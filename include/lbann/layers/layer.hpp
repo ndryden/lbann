@@ -29,6 +29,7 @@
 
 #include "lbann/base.hpp"
 #include "lbann/comm.hpp"
+#include "lbann/distconv.hpp"
 #include "lbann/utils/summary.hpp"
 #include "lbann/optimizers/optimizer.hpp"
 #include "lbann/utils/exception.hpp"

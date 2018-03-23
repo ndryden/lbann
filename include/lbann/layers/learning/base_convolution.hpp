@@ -88,6 +88,10 @@ class base_convolution_layer : public learning_layer {
   /** GPU memory for bias gradient. */
   cudnn::matrix m_bias_gradient_d;
 
+#ifdef LBANN_HAS_DISTCONV
+  TensorDev m_kernel_gradient_t;
+#endif
+
 #endif // LBANN_HAS_CUDNN
 
   public:

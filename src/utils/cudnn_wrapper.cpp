@@ -373,6 +373,12 @@ cudnn_manager::cudnn_manager(lbann::lbann_comm *_comm, int max_num_gpus, bool nc
     if(m_nccl_used){
         nccl_setup();
     }
+
+#ifdef LBANN_HAS_DISTCONV
+    // assumes there is only a single GPU
+    m_distconv_be = new distconv::cudnn::BackendCUDNN(get_handle(0),
+                                                      m_streams[0]);
+#endif
 }
 
 cudnn_manager::~cudnn_manager() {

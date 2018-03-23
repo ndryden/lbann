@@ -31,6 +31,7 @@
 
 #include "lbann/base.hpp"
 #include "lbann/comm.hpp"
+#include "lbann/distconv.hpp"
 #include "lbann/utils/exception.hpp"
 #include "lbann/utils/cudnn_wrapper.hpp"
 #include "lbann/weights/initializer.hpp"
@@ -230,6 +231,9 @@ class weights {
 #ifdef LBANN_HAS_CUDNN
   /** GPU memory for weights matrix. */
   std::vector<DataType*> m_values_d;
+#ifdef LBANN_HAS_DISTCONV
+  TensorDev m_values_t;
+#endif
 #endif // LBANN_HAS_CUDNN
 
   /** Setup GPU objects for weights. */

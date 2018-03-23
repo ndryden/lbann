@@ -97,6 +97,9 @@ option(${UPPER_PROJECT_NAME}_VERBOSE "Enable verbose output" OFF)
 option(${UPPER_PROJECT_NAME}_SEQUENTIAL_INITIALIZATION
   "Sequentially consistent initialization" OFF)
 
+option(${UPPER_PROJECT_NAME}_WITH_DISTCONV
+  "Enable Distconv distributed convolution" OFF)
+
 # FIXME what if "fp16"?
 set(${UPPER_PROJECT_NAME}_DATATYPE "float"
   CACHE STRING "The datatype to use in LBANN")
@@ -259,6 +262,11 @@ if (LBANN_WITH_ALUMINUM)
     set(LBANN_ALUMINUM_MPI_PASSTHROUGH ON)
   endif (LBANN_BUILT_WITH_SPECTRUM)
 endif (LBANN_WITH_ALUMINUM)
+
+if (LBANN_WITH_DISTCONV)
+  message(STATUS "DISTCONV requested")
+  set(LBANN_HAS_DISTCONV ON)
+endif (LBANN_WITH_DISTCONV)
 
 # Handle the documentation
 add_subdirectory(doc)

@@ -56,6 +56,7 @@ WITH_CUDA=
 WITH_TOPO_AWARE=ON
 INSTRUMENT=
 WITH_ALUMINUM=OFF
+WITH_DISTCONV=OFF
 WITH_TBINF=OFF
 RECONFIGURE=0
 # In case that autoconf fails during on-demand buid on surface, try the newer
@@ -229,6 +230,9 @@ while :; do
         --with-aluminum)
             WITH_ALUMINUM=ON
             ;;
+		--with-distconv)
+			WITH_DISTCONV=ON
+			;;
         --instrument)
             INSTRUMENT="-finstrument-functions -ldl"
             ;;
@@ -676,6 +680,7 @@ ${CMAKE_PATH}/cmake \
 -D LBANN_WITH_ALUMINUM=${WITH_ALUMINUM} \ 
 -D LBANN_ALUMINUM_DIR=${ALUMINUM_DIR} \
 -D LBANN_BUILT_WITH_SPECTRUM=${WITH_SPECTRUM} \
+-D LBANN_WITH_DISTCONV=${WITH_DISTCONV}
 ${SUPERBUILD_DIR}
 EOF
 )
