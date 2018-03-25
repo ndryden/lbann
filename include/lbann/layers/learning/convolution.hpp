@@ -282,7 +282,6 @@ class convolution_layer : public base_convolution_layer {
         << "m_kernel_dims: " << ss.str() << "\n";
 
     if (!(m_kernel_dims[2] == m_kernel_dims[3] &&
-          m_kernel_dims[2] > 1 &&
           m_kernel_dims[2] == m_pads[0] * 2 + 1 &&
           m_kernel_dims[3] == m_pads[1] * 2 + 1)) {
       MPIPrintStreamDebug() << "Unsupported convolution\n";
