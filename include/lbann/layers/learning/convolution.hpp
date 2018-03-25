@@ -293,6 +293,12 @@ class convolution_layer : public base_convolution_layer {
     Array4 input_tensor_shape = {m_prev_neuron_dims[2], m_prev_neuron_dims[1],
                                  m_prev_neuron_dims[0],
                                  this->m_model->get_max_mini_batch_size()};
+
+    MPIPrintStreamDebug()
+        << "input tensor shape: " << input_tensor_shape
+        << ", desc: " << dc::util::tostring(this->m_prev_activations_cudnn_desc)
+        << "\n";
+    
     Array4 input_local_shape = input_tensor_shape;
     // Assuming single GPU per rank
     input_local_shape[3] = m_max_mini_batch_size_per_gpu;
@@ -323,9 +329,12 @@ class convolution_layer : public base_convolution_layer {
     // 1D decomposition at the H dimension
     Array4 spatial_decomposition = {1, m_comm->get_procs_per_model(), 1, 1};
     Array4 overlap = {m_pads[1], m_pads[0], 0, 0};
-    // TODO: blocked decomposition if strides > 1
+    Array4 spatial_block_size = {m_strides[1], m_strides[0], 1, 1};
+    Array4 spatial_local_size = {0, 0, 0, 0};
+
     m_prev_activations_t = TensorDev(input_tensor_shape, loc,
-                                     Dist(spatial_decomposition, overlap));
+                                     Dist(spatial_decomposition, overlap),
+                                     spatial_local_size, spatial_block_size);
     m_prev_activations_t.allocate();
     m_prev_activations_t.zero();
     MPIPrintStreamDebug() << "prev_activations_t: " <<
@@ -340,6 +349,7 @@ class convolution_layer : public base_convolution_layer {
 
     m_activations_t = TensorDev(output_tensor_shape,
                                 loc, Dist(spatial_decomposition));
+
     m_activations_t.allocate();
 
     m_activations_e = TensorDev(output_tensor_shape, loc,
@@ -369,7 +379,8 @@ class convolution_layer : public base_convolution_layer {
                                   Dist(sample_decomposition),
                                   input_local_shape, division_block_size);
     m_error_signals_t = TensorDev(input_tensor_shape, loc,
-                                  Dist(spatial_decomposition));
+                                  Dist(spatial_decomposition),
+                                  spatial_local_size, spatial_block_size);
     m_error_signals_t.allocate();
 
 
