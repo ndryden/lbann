@@ -291,21 +291,22 @@ class convolution_layer : public base_convolution_layer {
 
     m_distconv_enabled = true;
     
-    Array4 tensor_shape = {m_neuron_dims[2], m_neuron_dims[1],
-                           m_neuron_dims[0],
-                           this->m_model->get_max_mini_batch_size()};
-    Array4 local_shape = tensor_shape;
+    Array4 input_tensor_shape = {m_prev_neuron_dims[2], m_prev_neuron_dims[1],
+                                 m_prev_neuron_dims[0],
+                                 this->m_model->get_max_mini_batch_size()};
+    Array4 input_local_shape = input_tensor_shape;
     // Assuming single GPU per rank
-    local_shape[3] = m_max_mini_batch_size_per_gpu;
+    input_local_shape[3] = m_max_mini_batch_size_per_gpu;
     Array4 division_block_size = {1, 1, 1, 1};
 
     LocaleMPI loc(m_comm->get_model_comm().comm);
     // Sample distribution
     Array4 sample_decomposition = {1, 1, 1, m_comm->get_procs_per_model()};
 
-    m_prev_activations_e = ConstTensorDev(tensor_shape, loc,
+    m_prev_activations_e = ConstTensorDev(input_tensor_shape, loc,
                                           Dist(sample_decomposition),
-                                          local_shape, division_block_size);
+                                          input_local_shape,
+                                          division_block_size);
 
     // View must be set every time fp is called, but it's also
     // necessary to call here as we need its memory property to be set
@@ -324,7 +325,7 @@ class convolution_layer : public base_convolution_layer {
     Array4 spatial_decomposition = {1, m_comm->get_procs_per_model(), 1, 1};
     Array4 overlap = {m_pads[1], m_pads[0], 0, 0};
     // TODO: blocked decomposition if strides > 1
-    m_prev_activations_t = TensorDev(tensor_shape, loc,
+    m_prev_activations_t = TensorDev(input_tensor_shape, loc,
                                      Dist(spatial_decomposition, overlap));
     m_prev_activations_t.allocate();
     m_prev_activations_t.zero();
@@ -332,20 +333,30 @@ class convolution_layer : public base_convolution_layer {
         m_prev_activations_t << ", mem: " <<
         m_prev_activations_t.get_data() << "\n";
 
-    m_activations_t = TensorDev(tensor_shape, loc, Dist(spatial_decomposition));
+    Array4 output_tensor_shape = {m_neuron_dims[2], m_neuron_dims[1],
+                                  m_neuron_dims[0],
+                                  this->m_model->get_max_mini_batch_size()};
+    Array4 output_local_shape = output_tensor_shape;
+    output_local_shape[3] = m_max_mini_batch_size_per_gpu;
+
+    m_activations_t = TensorDev(output_tensor_shape,
+                                loc, Dist(spatial_decomposition));
     m_activations_t.allocate();
 
-    m_activations_e = TensorDev(tensor_shape, loc, Dist(sample_decomposition),
-                                local_shape, division_block_size);
+    m_activations_e = TensorDev(output_tensor_shape, loc,
+                                Dist(sample_decomposition),
+                                output_local_shape,
+                                division_block_size);
 
     // prev_error_signals
-    m_prev_error_signals_t = TensorDev(tensor_shape, loc,
+    m_prev_error_signals_t = TensorDev(output_tensor_shape, loc,
                                        Dist(spatial_decomposition, overlap));
     m_prev_error_signals_t.allocate();
     m_prev_error_signals_t.zero();
-    m_prev_error_signals_e = ConstTensorDev(tensor_shape, loc,
+    m_prev_error_signals_e = ConstTensorDev(output_tensor_shape, loc,
                                             Dist(sample_decomposition),
-                                            local_shape, division_block_size);
+                                            output_local_shape,
+                                            division_block_size);
     
     assert0(dc::tensor::View(
         m_prev_error_signals_e,
@@ -355,10 +366,10 @@ class convolution_layer : public base_convolution_layer {
         m_prev_error_signals_e << "\n";
 
     // error_signals
-    m_error_signals_e = TensorDev(tensor_shape, loc,
+    m_error_signals_e = TensorDev(input_tensor_shape, loc,
                                   Dist(sample_decomposition),
-                                  local_shape, division_block_size);
-    m_error_signals_t = TensorDev(tensor_shape, loc,
+                                  input_local_shape, division_block_size);
+    m_error_signals_t = TensorDev(input_tensor_shape, loc,
                                   Dist(spatial_decomposition));
     m_error_signals_t.allocate();
 
