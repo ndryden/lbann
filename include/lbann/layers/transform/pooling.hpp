@@ -33,6 +33,8 @@
 #include "lbann/utils/cudnn_wrapper.hpp"
 #include "lbann/utils/exception.hpp"
 #include "lbann/utils/im2col.hpp"
+#include "lbann_config.hpp"
+#include "lbann/distconv.hpp"
 
 namespace lbann {
 
@@ -233,6 +235,9 @@ class pooling_layer : public transform_layer {
                                             m_pads.data(),
                                             m_strides.data()));
 
+#ifdef LBANN_HAS_DISTCONV
+    setup_tensors();
+#endif
   #endif // #ifndef LBANN_HAS_CUDNN
   }
 
@@ -240,7 +245,17 @@ class pooling_layer : public transform_layer {
 
   void fp_compute() override {
     if(this->m_using_gpus) {
+#ifdef LBANN_HAS_DISTCONV
+      if (m_distconv_enabled) {
+        fp_compute_distconv();
+        //MPI_Barrier(MPI_COMM_WORLD);
+        //exit(0);
+      } else {
+        fp_compute_cudnn();
+      }
+#else      
       fp_compute_cudnn();
+#endif      
     } else {
       fp_compute_im2col();
     }
@@ -248,7 +263,15 @@ class pooling_layer : public transform_layer {
 
   void bp_compute() override {
     if(this->m_using_gpus) {
+#ifdef LBANN_HAS_DISTCONV
+      if (m_distconv_enabled) {
+        bp_compute_distconv();        
+      } else {
+        bp_compute_cudnn();        
+      }
+#else
       bp_compute_cudnn();
+#endif      
     } else {
       bp_compute_im2col();
     }
@@ -492,6 +515,212 @@ class pooling_layer : public transform_layer {
     }
 
   }
+  
+  void setup_tensors() {
+#ifndef LBANN_HAS_DISTCONV
+    throw lbann_exception(
+        std::string {} + __FILE__ + " " + std::to_string(__LINE__) + " :: " +
+        "Layer: DISTCONV not detected");
+#else
+    MPIPrintStreamDebug()
+        << "pooling: setup_tensors."
+        << " pads: " << m_pads[0] << "x" << m_pads[1]
+        << ", pool_dims: " << m_pool_dims[0] << "x" << m_pool_dims[1]
+        << ", m_strides: " << m_strides[0] << "x" << m_strides[1]
+        << "\n";
+
+    if (!(m_pads[0] == 0 && m_pads[1] == 0 &&
+          m_pool_dims[0] % 2 != 0 && m_pool_dims[1] % 2 != 0)) {
+      MPIPrintStreamDebug() << "pooling: unsupported \n";
+      return;
+    }
+    
+    int stencil_h = (m_pool_dims[0] - 1) / 2;
+    int stencil_w = (m_pool_dims[1] - 1) / 2;
+
+    if (!((m_strides[0] == 1 && m_strides[1] == 1) ||
+         (m_strides[0] == stencil_h + 1 &&
+          m_strides[1] == stencil_w + 1))) {
+      MPIPrintStreamDebug() << "pooling: unsupported \n";
+      return;
+    }
+
+    // REFACTORING: duplicated at convolution::setup_tensors
+    Array4 input_tensor_shape =
+        {m_prev_neuron_dims[2], m_prev_neuron_dims[1],
+         m_prev_neuron_dims[0],
+         this->m_model->get_max_mini_batch_size()};
+
+    // shape dim must be divisible by strides
+    if (!(input_tensor_shape[0] % m_strides[0] == 0 &&
+          input_tensor_shape[1] % m_strides[1] == 0)) {
+      MPIPrintStreamDebug() << "Not divisible by strides\n";
+      return;
+    }
+    
+    m_distconv_enabled = true;
+
+    Array4 input_local_shape = input_tensor_shape;
+    // Assuming single GPU per rank
+    input_local_shape[3] = m_max_mini_batch_size_per_gpu;
+    Array4 division_block_size = {1, 1, 1, 1};
+
+    LocaleMPI loc(m_comm->get_model_comm().comm);
+    // Sample distribution
+    Array4 sample_decomposition = {1, 1, 1, m_comm->get_procs_per_model()};
+    
+    m_prev_activations_e = ConstTensorDev(input_tensor_shape, loc,
+                                          Dist(sample_decomposition),
+                                          input_local_shape,
+                                          division_block_size);
+
+    assert0(dc::tensor::View(
+        m_prev_activations_e,
+        m_prev_activations_d[0].get_locked_data(0)));
+
+    Array4 spatial_decomposition = {1, m_comm->get_procs_per_model(), 1, 1};
+    Array4 overlap = {m_pads[1], m_pads[0], 0, 0};
+    Array4 spatial_block_size = {m_strides[1], m_strides[0], 1, 1};
+    Array4 spatial_local_size = {0, 0, 0, 0};
+
+    m_prev_activations_t = TensorDev(input_tensor_shape, loc,
+                                     Dist(spatial_decomposition, overlap),
+                                     spatial_local_size, spatial_block_size);
+    m_prev_activations_t.allocate();
+    m_prev_activations_t.zero();
+    
+    Array4 output_tensor_shape = {m_neuron_dims[2], m_neuron_dims[1],
+                                  m_neuron_dims[0],
+                                  this->m_model->get_max_mini_batch_size()};
+    Array4 output_local_shape = output_tensor_shape;
+    output_local_shape[3] = m_max_mini_batch_size_per_gpu;
+
+    m_activations_t = TensorDev(output_tensor_shape,
+                                loc, Dist(spatial_decomposition));
+
+    m_activations_t.allocate();
+
+    m_activations_e = TensorDev(output_tensor_shape, loc,
+                                Dist(sample_decomposition),
+                                output_local_shape,
+                                division_block_size);
+    // prev_error_signals
+    m_prev_error_signals_t = TensorDev(output_tensor_shape, loc,
+                                       Dist(spatial_decomposition));
+    m_prev_error_signals_t.allocate();
+    m_prev_error_signals_t.zero();
+    m_prev_error_signals_e = ConstTensorDev(output_tensor_shape, loc,
+                                            Dist(sample_decomposition),
+                                            output_local_shape,
+                                            division_block_size);
+    assert0(dc::tensor::View(
+        m_prev_error_signals_e,
+        m_prev_error_signals_d[0].get_locked_data(0)));
+
+    // error_signals
+    m_error_signals_e = TensorDev(input_tensor_shape, loc,
+                                  Dist(sample_decomposition),
+                                  input_local_shape, division_block_size);
+    // Needs halo
+    m_error_signals_t = TensorDev(input_tensor_shape, loc,
+                                  Dist(spatial_decomposition, overlap),
+                                  spatial_local_size, spatial_block_size);
+    m_error_signals_t.allocate();
+
+    // Init the dc::Pooling layer
+    m_pooling = new dc::Pooling<dc::cudnn::BackendCUDNN>(
+        *this->m_cudnn->get_distconv_backend());
+
+    std::string mode;
+    switch(m_pool_mode) {
+      case pool_mode::max:
+        mode = "MAX"; break;
+      case pool_mode::average:
+        mode = "AVERAGE"; break;
+      case pool_mode::average_no_pad:
+        mode = "AVERAGE_NO_PAD"; break;
+    default:
+      throw lbann_exception("pooling_layer: no DISTCONV implementation for pooling mode");
+    }
+    
+    m_pooling->setup(m_prev_activations_t,
+                     m_activations_t,
+                     m_pool_dims[0], m_pool_dims[1],
+                     m_pads[0], m_pads[1],
+                     m_strides[0], m_strides[1],
+                     mode);
+#endif
+  }
+  
+  void fp_compute_distconv() {
+#ifndef LBANN_HAS_DISTCONV
+    throw lbann_exception("pooling_layer: DISTCONV not detected");
+#else
+    MPIPrintStreamDebug() << "Forward pooling\n";
+
+    assert_always(m_distconv_enabled);
+    
+    assert0(dc::tensor::View(
+        m_prev_activations_e,
+        m_prev_activations_d[0].get_locked_data(0)));
+    assert0(dc::tensor::Copy(
+        m_prev_activations_t, m_prev_activations_e));
+
+    m_pooling->set_num_samples(this->m_model->get_current_mini_batch_size());
+
+    m_pooling->forward(1.0, m_prev_activations_t,
+                       0.0, m_activations_t);
+
+    assert0(dc::tensor::View(
+        m_activations_e, m_activations_d[0].get_data(0)));
+    assert0(dc::tensor::Copy(
+        m_activations_e, m_activations_t));
+
+#endif
+  }
+
+  void bp_compute_distconv() {
+#ifndef LBANN_HAS_DISTCONV
+    throw lbann_exception("pooling_layer: DISTCONV not detected");
+#else
+    MPIPrintStreamDebug() << "Backward pooling\n";
+
+    assert_always(m_distconv_enabled);
+
+    assert0(dc::tensor::View(
+        m_prev_error_signals_e,
+        m_prev_error_signals_d[0].get_locked_data(0)));
+    assert0(dc::tensor::Copy(
+        m_prev_error_signals_t, m_prev_error_signals_e));
+
+    assert0(dc::tensor::View(
+        m_error_signals_e, m_error_signals_d[0].get_data(0)));
+    assert0(dc::tensor::Copy(
+        m_error_signals_t, m_error_signals_e));
+
+    m_pooling->backward(1.0, m_activations_t, m_prev_error_signals_t,
+                        m_prev_activations_t, 1.0, m_error_signals_t);
+
+    assert0(dc::tensor::Copy(
+        m_error_signals_e, m_error_signals_t));
+#endif    
+  }  
+  
+#ifdef LBANN_HAS_DISTCONV
+  bool m_distconv_enabled = false;
+  dc::Pooling<dc::cudnn::BackendCUDNN> *m_pooling;
+  // Forward prop
+  TensorDev m_prev_activations_t;
+  ConstTensorDev m_prev_activations_e;
+  TensorDev m_activations_t;
+  TensorDev m_activations_e;
+  // Backward prop
+  TensorDev m_prev_error_signals_t;
+  ConstTensorDev m_prev_error_signals_e;
+  TensorDev m_error_signals_t;
+  TensorDev m_error_signals_e;
+  
+#endif
 
 };
 
