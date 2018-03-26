@@ -35,6 +35,7 @@
 #include "lbann/utils/random.hpp"
 #include "lbann/utils/timer.hpp"
 #include "lbann_config.hpp"
+#include "lbann/distconv.hpp"
 
 namespace lbann {
 
