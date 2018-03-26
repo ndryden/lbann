@@ -579,7 +579,7 @@ class pooling_layer : public transform_layer {
         m_prev_activations_d[0].get_locked_data(0)));
 
     Array4 spatial_decomposition = {1, m_comm->get_procs_per_model(), 1, 1};
-    Array4 overlap = {m_pads[1], m_pads[0], 0, 0};
+    Array4 overlap = {stencil_w, stencil_h, 0, 0};
     Array4 spatial_block_size = {m_strides[1], m_strides[0], 1, 1};
     Array4 spatial_local_size = {0, 0, 0, 0};
 
@@ -649,6 +649,18 @@ class pooling_layer : public transform_layer {
                      m_pads[0], m_pads[1],
                      m_strides[0], m_strides[1],
                      mode);
+
+    MPIPrintStreamDebug()
+        << "Pooling. "
+        << "prev_activations_e: " << m_prev_activations_e
+        << ", prev_activations_t: " << m_prev_activations_t
+        << ", activations_e: " << m_activations_e
+        << ", activations_t: " << m_activations_t
+        << ", prev_error_signals_e: " << m_prev_activations_e
+        << ", prev_error_signals_t: " << m_prev_activations_t
+        << ", error_signals_e: " << m_error_signals_e
+        << ", error_signals_t: " << m_error_signals_t
+        << "\n";
 #endif
   }
   
