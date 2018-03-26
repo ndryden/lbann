@@ -242,6 +242,15 @@ class convolution_layer : public base_convolution_layer {
         if (true) {
           compute_gradients_distconv();
           apply_transposed_convolution_distconv();
+          --m_exit_count;
+#if 0          
+          if (m_exit_count == 0) {
+            MPIPrintStreamDebug() << "exiting for profiling\n";
+            cudaDeviceReset();
+            MPI_Barrier(MPI_COMM_WORLD);
+            exit(0);
+          }
+#endif          
         } else {
           compute_gradients_cudnn(false);
           apply_transposed_convolution_distconv();
@@ -285,15 +294,23 @@ class convolution_layer : public base_convolution_layer {
     if (!(m_kernel_dims[2] == m_kernel_dims[3] &&
           m_kernel_dims[2] == m_pads[0] * 2 + 1 &&
           m_kernel_dims[3] == m_pads[1] * 2 + 1)) {
-      MPIPrintStreamDebug() << "Unsupported convolution\n";
+      MPIPrintStreamDebug() << "Unsupported as padding does not match the kernel size\n";
       return;
     }
 
-    m_distconv_enabled = true;
-    
     Array4 input_tensor_shape = {m_prev_neuron_dims[2], m_prev_neuron_dims[1],
                                  m_prev_neuron_dims[0],
                                  this->m_model->get_max_mini_batch_size()};
+
+    if (!(input_tensor_shape[0] % m_strides[1] == 0 &&
+          input_tensor_shape[1] % m_strides[0] == 0)) {
+      MPIPrintStreamDebug() << "Unsupported as tensor dimensions not devisible by strides\n";
+      return;
+    }
+    
+    m_distconv_enabled = true;
+
+    MPIPrintStreamDebug() << "convolution: distconv enabled\n";
 
     MPIPrintStreamDebug()
         << "input tensor shape: " << input_tensor_shape
