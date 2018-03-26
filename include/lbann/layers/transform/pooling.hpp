@@ -559,6 +559,7 @@ class pooling_layer : public transform_layer {
     }
     
     m_distconv_enabled = true;
+    MPIPrintStreamDebug() << "pooling: distconv enabled\n";
 
     Array4 input_local_shape = input_tensor_shape;
     // Assuming single GPU per rank

@@ -284,7 +284,7 @@ class convolution_layer : public base_convolution_layer {
         std::string {} + __FILE__ + " " + std::to_string(__LINE__) + " :: " +
         "Layer: DISTCONV not detected");
 #else
-    MPIPrintStreamDebug() << "setup_tensors\n";
+    MPIPrintStreamDebug() << "convolution: setup_tensors\n";
 
     std::stringstream ss;
     dc::util::print_vector(ss, m_kernel_dims.begin(), m_kernel_dims.end());

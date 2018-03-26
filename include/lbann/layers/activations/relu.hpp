@@ -218,6 +218,8 @@ class relu_layer : public entrywise_activation_layer {
     
     m_distconv_enabled = true;
 
+    MPIPrintStreamDebug() << "relu: distconv enabled\n";
+
     // REFACTORING: duplicated at convolution::setup_tensors
     Array4 input_tensor_shape =
         {m_prev_neuron_dims[2], m_prev_neuron_dims[1],
