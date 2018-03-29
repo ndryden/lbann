@@ -219,6 +219,14 @@ std::vector<Layer*> construct_layer_graph(lbann_comm* comm,
           << "(" << layout_str << ")";
       LBANN_ERROR(err.str());
     }
+    // Set up parallel strategy.
+    ParallelStrategy& ps = l->get_parallel_strategy();
+    ps.sample_groups = proto_layer.parallel_strategy().sample_groups();
+    ps.height_groups = proto_layer.parallel_strategy().height_groups();
+    ps.width_groups = proto_layer.parallel_strategy().width_groups();
+    ps.channel_groups = proto_layer.parallel_strategy().channel_groups();
+    ps.filter_groups = proto_layer.parallel_strategy().filter_groups();
+    ps.replications = proto_layer.parallel_strategy().replications();
 
     // Check that layer has been constructed
     if (l == nullptr) {
