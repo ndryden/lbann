@@ -33,12 +33,15 @@
 #include "lbann/layers/transform/dummy.hpp"
 #include "lbann/layers/transform/split.hpp"
 #include "lbann/utils/random.hpp"
+#include "lbann/distconv.hpp"
 #include <string>
 #include <unistd.h>
 #include <iomanip>
 #include <queue>
 #include <unordered_set>
 #include <lbann.pb.h>
+#include <set>
+#include <map>
 
 #include "mpi.h"
 
@@ -417,6 +420,59 @@ void model::setup_layers() {
       std::cout << print_layer_description(layer) << std::endl;
     }
   }
+#ifdef LBANN_HAS_DISTCONV
+  // Dist[4]: {x, y, dx, dy}
+  std::map<const Layer*, std::array<Dist, 4>> dists;
+  std::map<Dist*, std::set<Dist*>> invariants;
+  std::set<Dist*> updated;
+  std::set<Dist*> fixed;
+  for (const auto& layer : m_layers) {  
+    layer->setup_tensor_distribution_init(dists, invariants, updated, fixed);
+  }
+  for (const auto& layer : m_layers) {    
+    layer->setup_tensor_distribution_add_adjacent_invariants(
+        dists, invariants);
+  }
+  while (updated.size() > 0) {
+    std::cout << "# of updated dists: " << updated.size() << "\n";
+    std::set<Dist*> updated_new;    
+    for (const auto d: updated) {
+      std::cout << "Updated: " << *d << "\n";
+      for (auto p: invariants[d]) {
+        std::cout << "Invariant: " << *p << "\n";
+        if (d->get_overlap() != p->get_overlap()) {
+          if (fixed.find(p) != fixed.end()) {
+            throw lbann_exception("Cannot satisfy the distconv constraints");            
+          }
+          p->set_overlap(d->get_overlap());
+          updated_new.insert(p);
+        }
+      }
+    }
+    updated = std::move(updated_new);
+  }
+  std::cout << "Constraints satisfied\n";
+  for (const auto& layer : m_layers) {  
+    MPIPrintStreamDebug()
+        << layer->get_name()
+        << "; prev_activations_dist: " << dists[layer][0]
+        << ", activations_dist: " << dists[layer][1]
+        << ", error_signals_dist: " << dists[layer][2]
+        << ", prev_error_signals_dist: " << dists[layer][3]
+        << "\n";
+  }
+    
+  for (auto it = m_layers.rbegin(); it != m_layers.rend(); ++it) {  
+    (*it)->setup_tensor_distribution_block();
+  }
+  
+  for (const auto& layer : m_layers) {  
+    layer->setup_tensors_fwd(dists[layer]);
+  }
+  for (auto it = m_layers.rbegin(); it != m_layers.rend(); ++it) {  
+    (*it)->setup_tensors_bwd(dists[*it]);
+  }
+#endif    
 }
 
 void model::setup_weights() {

@@ -108,10 +108,6 @@ class relu_layer : public entrywise_activation_layer {
                                              CUDNN_PROPAGATE_NAN,
                                              0.0));
 
-#ifdef LBANN_HAS_DISTCONV
-    setup_tensors();
-#endif
-    
 #endif // LBANN_HAS_CUDNN
   }
 
@@ -129,10 +125,15 @@ class relu_layer : public entrywise_activation_layer {
   #ifndef LBANN_HAS_CUDNN
     throw lbann_exception("relu_layer: cuDNN not detected");
   #else
+#ifdef LBANN_HAS_DISTCONV
+    if (m_distconv_enabled) {
+      fp_compute_distconv();
+      return;
+    }
+#endif
     // Useful constants
     const DataType one = 1;
     const DataType zero = 0;
-#ifndef LBANN_HAS_DISTCONV
     // Apply activation on each GPU
     const int num_gpus = this->m_cudnn->get_num_gpus();
     for(int i = 0; i < num_gpus; ++i) {
@@ -148,26 +149,22 @@ class relu_layer : public entrywise_activation_layer {
                                          this->m_activations_cudnn_desc,
                                          this->m_activations_d[0].get_data(i)));
     }
-#else
-    assert0(dc::tensor::View(
-        m_prev_activations_e,
-        m_prev_activations_d[0].get_locked_data(0)));
-    assert0(dc::tensor::View(
-        m_activations_e, m_activations_d[0].get_data(0)));
-    m_relu->set_num_samples(this->m_model->get_current_mini_batch_size());    
-    m_relu->forward(one, m_prev_activations_e,
-                    zero, m_activations_e);
-#endif // LBANN_HAS_DISTCONV
   #endif // LBANN_HAS_CUDNN
   }
+  
 
   void bp_compute_gpu() override {
   #ifndef LBANN_HAS_CUDNN
     throw lbann_exception("relu_layer: cuDNN not detected");
   #else
+#ifdef LBANN_HAS_DISTCONV
+    if (m_distconv_enabled) {
+      bp_compute_distconv();
+      return;
+    }
+#endif // LBANN_HAS_DISTCONV
     // Useful constants
     const DataType one = 1;
-#ifndef LBANN_HAS_DISTCONV
     // Apply activation derivative on each GPU
     const int num_gpus = this->m_cudnn->get_num_gpus();
     for(int i = 0; i < num_gpus; ++i) {
@@ -187,118 +184,208 @@ class relu_layer : public entrywise_activation_layer {
                                           this->m_error_signals_cudnn_desc,
                                           this->m_error_signals_d[0].get_data(i)));
     }
-#else
-    assert0(dc::tensor::View(
-        m_activations_e, m_activations_d[0].get_data(0)));
-    assert0(dc::tensor::View(
-        m_prev_activations_e,
-        m_prev_activations_d[0].get_locked_data(0)));
-    assert0(dc::tensor::View(
-        m_prev_error_signals_e,
-        m_prev_error_signals_d[0].get_locked_data(0)));
-    assert0(dc::tensor::View(
-        m_error_signals_e,
-        m_error_signals_d[0].get_data(0)));
-    m_relu->backward(one, m_activations_e, m_prev_error_signals_e,
-                     m_prev_activations_e, one,
-                     m_error_signals_e);
-#endif // LBANN_HAS_DISTCONV
   #endif // LBANN_HAS_CUDNN
   }
 
-  void setup_tensors() {
-#ifndef LBANN_HAS_DISTCONV
-    throw lbann_exception(
-        std::string {} + __FILE__ + " " + std::to_string(__LINE__) + " :: " +
-        "Layer: DISTCONV not detected");
-#else
-    MPIPrintStreamDebug()
-        << "relu: setup_tensors."
-        << "\n";
+#ifdef LBANN_HAS_DISTCONV
+ public:
+  bool using_distconv() const override {
+    return true;
+  }
+
+  void setup_tensor_distribution_init(
+      std::map<const Layer*, std::array<Dist, 4>> &dists,  
+      std::map<Dist*, std::set<Dist*>> &invariants,
+      std::set<Dist*> &updated,
+      std::set<Dist*> &fixed) override {
+    Layer::setup_tensor_distribution_init(
+        dists, invariants, updated, fixed);
+    if (!using_distconv()) return;
+    auto &layer_dists = dists[this];
+#ifdef DISTCONV_USE_SAME_RELU_CALL_AS_LBANN
+    // This isn't necessary for cuDNN, but necessary to make it work
+    // with the ordering of ReLU parameters used in LBANN
+    // x == y
+    invariants[&layer_dists[0]].insert(
+        &layer_dists[1]);
+    invariants[&layer_dists[1]].insert(
+        &layer_dists[0]);
+#endif    
+    // x == dx
+    invariants[&layer_dists[0]].insert(
+        &layer_dists[2]);
+    invariants[&layer_dists[2]].insert(
+        &layer_dists[0]);
+    //y == dy
+    invariants[&layer_dists[1]].insert(
+        &layer_dists[3]);
+    invariants[&layer_dists[3]].insert(
+        &layer_dists[1]);
+  }
+
+  void setup_tensors_fwd(const std::array<Dist, 4> &dists) override {   
+    Layer::setup_tensors_fwd(dists);    
+    if (!m_distconv_enabled) return;
     
-    m_distconv_enabled = true;
-
-    MPIPrintStreamDebug() << "relu: distconv enabled\n";
-
     // REFACTORING: duplicated at convolution::setup_tensors
-    Array4 input_tensor_shape =
+    const Array4 input_tensor_shape =
         {m_prev_neuron_dims[2], m_prev_neuron_dims[1],
-         m_prev_neuron_dims[0],
-         this->m_model->get_max_mini_batch_size()};
-
+         m_prev_neuron_dims[0], this->m_model->get_max_mini_batch_size()};
+    const LocaleMPI loc(m_comm->get_model_comm().comm, false);
+    const Array4 sample_block_size = {1, 1, 1, 1};
+    const Dist sample_dist = Dist({1, 1, 1, m_comm->get_procs_per_model()});    
     Array4 input_local_shape = input_tensor_shape;
     // Assuming single GPU per rank
     input_local_shape[3] = m_max_mini_batch_size_per_gpu;
-    Array4 division_block_size = {1, 1, 1, 1};
+    const Array4 spatial_local_size = {0, 0, 0, 0};
+    const Array4 output_tensor_shape =
+        {m_neuron_dims[2], m_neuron_dims[1],
+         m_neuron_dims[0], this->m_model->get_max_mini_batch_size()};
+    Array4 output_local_shape = output_tensor_shape;
+    output_local_shape[3] = m_max_mini_batch_size_per_gpu;
+    
+    if (m_parent_copy_required) {
+      MPIPrintStreamDebug() << "copying prev activations required\n";
+      m_prev_activations_const_view = ConstTensorDev(input_tensor_shape, loc,
+                                                     sample_dist,
+                                                     input_local_shape,
+                                                     sample_block_size);
+      m_prev_activations_t = TensorDev(input_tensor_shape, loc, dists[0],
+                                       spatial_local_size, m_input_decomposition_block);
+      assert0(m_prev_activations_t.allocate());
+      m_prev_activations_t.zero();      
+    } else {
+      MPIPrintStreamDebug() << "directly using prev activations\n";
+      m_prev_activations_t = get_parent_layers()[0]->get_activations_t();      
+      assert_always(m_prev_activations_t.get_distribution() == dists[0]);
+      assert_always(m_prev_activations_t.get_requested_local_block()
+                    == m_input_decomposition_block);
+    }
 
-    LocaleMPI loc(m_comm->get_model_comm().comm);
-    // Sample distribution
-    Array4 sample_decomposition = {1, 1, 1, m_comm->get_procs_per_model()};
+    m_activations_t = TensorDev(output_tensor_shape,
+                                loc, dists[1], spatial_local_size,
+                                m_output_decomposition_block);
+    assert0(m_activations_t.allocate());
+    m_activations_t.zero();
+    
+    if (m_child_copy_required) {
+      m_activations_copyout = TensorDev(output_tensor_shape, loc, sample_dist,
+                                        output_local_shape, sample_block_size);
+    }
+  }
 
-    // prev_activations
-    m_prev_activations_e = ConstTensorDev(input_tensor_shape, loc,
-                                          Dist(sample_decomposition),
-                                          input_local_shape,
-                                          division_block_size);
-    assert0(dc::tensor::View(
-        m_prev_activations_e,
-        m_prev_activations_d[0].get_locked_data(0)));
-
-    Array4 output_tensor_shape = {m_neuron_dims[2], m_neuron_dims[1],
-                                  m_neuron_dims[0],
-                                  this->m_model->get_max_mini_batch_size()};
+  void setup_tensors_bwd(const std::array<Dist, 4> &dists) override {
+    Layer::setup_tensors_bwd(dists);    
+    if (!m_distconv_enabled) return;
+    
+    // REFACTORING: duplicated at convolution::setup_tensors
+    const Array4 input_tensor_shape =
+        {m_prev_neuron_dims[2], m_prev_neuron_dims[1],
+         m_prev_neuron_dims[0], this->m_model->get_max_mini_batch_size()};
+    const LocaleMPI loc(m_comm->get_model_comm().comm, false);
+    const Array4 sample_block_size = {1, 1, 1, 1};
+    const Dist sample_dist = Dist({1, 1, 1, m_comm->get_procs_per_model()});    
+    Array4 input_local_shape = input_tensor_shape;
+    // Assuming single GPU per rank
+    input_local_shape[3] = m_max_mini_batch_size_per_gpu;
+    const Array4 spatial_local_size = {0, 0, 0, 0};
+    const Array4 output_tensor_shape =
+        {m_neuron_dims[2], m_neuron_dims[1],
+         m_neuron_dims[0], this->m_model->get_max_mini_batch_size()};
     Array4 output_local_shape = output_tensor_shape;
     output_local_shape[3] = m_max_mini_batch_size_per_gpu;
 
-    // activations
-    m_activations_e = TensorDev(output_tensor_shape, loc,
-                                Dist(sample_decomposition),
-                                output_local_shape,
-                                division_block_size);
-    assert0(dc::tensor::View(
-        m_activations_e, m_activations_d[0].get_data(0)));
-    
-
     // prev_error_signals
-    m_prev_error_signals_e = ConstTensorDev(output_tensor_shape, loc,
-                                            Dist(sample_decomposition),
-                                            output_local_shape,
-                                            division_block_size);
-    assert0(dc::tensor::View(
-        m_prev_error_signals_e,
-        m_prev_error_signals_d[0].get_locked_data(0)));
+    if (m_child_copy_required) {
+      m_prev_error_signals_const_view = ConstTensorDev(output_tensor_shape, loc,
+                                                       sample_dist,
+                                                       output_local_shape,
+                                                       sample_block_size);
+      m_prev_error_signals_t = TensorDev(output_local_shape, loc,
+                                         dists[3],
+                                         spatial_local_size,
+                                         m_output_decomposition_block);
+      assert0(m_prev_error_signals_t.allocate());
+      m_prev_error_signals_t.zero();
+    } else {
+      m_prev_error_signals_t = get_child_layers()[0]->get_error_signals_t();
+      assert_always(m_prev_error_signals_t.get_distribution() ==
+                    dists[3]);
+      assert_always(m_prev_error_signals_t.get_requested_local_block() ==
+                    m_output_decomposition_block);
+    }
 
     // error_signals
-    m_error_signals_e = TensorDev(input_tensor_shape, loc,
-                                  Dist(sample_decomposition),
-                                  input_local_shape, division_block_size);
-    assert0(dc::tensor::View(
-        m_error_signals_e,
-        m_error_signals_d[0].get_data(0)));
+    m_error_signals_t = TensorDev(input_tensor_shape, loc,
+                                  dists[2], spatial_local_size,
+                                  m_input_decomposition_block);
+    assert0(m_error_signals_t.allocate());
+    m_error_signals_t.zero();
+
+    if (m_parent_copy_required) {
+      m_error_signals_copyout = TensorDev(input_tensor_shape, loc, sample_dist,
+                                          input_local_shape, sample_block_size);
+    }
 
     // Init the dc::Pooling layer
     m_relu = new dc::ReLU<dc::cudnn::BackendCUDNN>(
         *this->m_cudnn->get_distconv_backend());
 
-    m_relu->setup(m_prev_activations_e,
-                  m_activations_e,
-                  m_error_signals_e,
-                  m_prev_error_signals_e);
-#endif
+    m_relu->setup(m_prev_activations_t, m_activations_t,
+                  m_error_signals_t, m_prev_error_signals_t);
   }
   
+  void fp_compute_distconv() {
+    MPIPrintStreamDebug() << get_name() << ": Forward computation\n";
+    
+    // Useful constants
+    const DataType one = 1;
+    const DataType zero = 0;
+    m_relu->set_num_samples(this->m_model->get_current_mini_batch_size());        
+    if (m_parent_copy_required) {
+      MPIPrintStreamDebug() << "Copying to spatial decomposition\n";      
+      assert0(dc::tensor::View(
+          m_prev_activations_const_view,
+          m_prev_activations_d[0].get_locked_data(0)));
+      assert0(dc::tensor::Copy(m_prev_activations_t, m_prev_activations_const_view));
+    } else {
+      MPIPrintStreamDebug()
+          << "Directly reading activations of previous layer\n";
+    }
+    m_relu->forward(one, m_prev_activations_t,
+                    zero, m_activations_t);
+    if (m_child_copy_required) {
+      assert0(dc::tensor::View(
+          m_activations_copyout, m_activations_d[0].get_data(0)));
+      assert0(dc::tensor::Copy(m_activations_copyout, m_activations_t));
+    }
+  }
 
-#ifdef LBANN_HAS_DISTCONV
-  bool m_distconv_enabled = false;
-  dc::ReLU<dc::cudnn::BackendCUDNN> *m_relu;
-  // Forward prop
-  ConstTensorDev m_prev_activations_e;
-  TensorDev m_activations_e;
-  // Backward prop
-  ConstTensorDev m_prev_error_signals_e;
-  TensorDev m_error_signals_e;
+  void bp_compute_distconv() {
+    const DataType one = 1;
+    if (m_child_copy_required) {
+      assert0(dc::tensor::View(
+          m_prev_error_signals_const_view,
+          m_prev_error_signals_d[0].get_locked_data(0)));
+      assert0(dc::tensor::Copy(m_prev_error_signals_t, m_prev_error_signals_const_view));
+    }
+#ifdef DISTCONV_ZERO_OUT_ERROR_SIGNALS
+    m_error_signals_t.zero();
+    m_relu->backward(one, m_activations_t, m_prev_error_signals_t,
+                     m_prev_activations_t, one, m_error_signals_t);
+#else    
+    m_relu->backward(one, m_activations_t, m_prev_error_signals_t,
+                     m_prev_activations_t, DataType(0), m_error_signals_t);
 #endif
+    if (m_parent_copy_required) {
+      assert0(dc::tensor::View(m_error_signals_copyout, m_error_signals_d[0].get_data(0)));      
+      assert0(dc::tensor::Copy(m_error_signals_copyout, m_error_signals_t));
+    }
+  }
   
+ protected:
+  dc::ReLU<dc::cudnn::BackendCUDNN> *m_relu;
+#endif
 
 };
 

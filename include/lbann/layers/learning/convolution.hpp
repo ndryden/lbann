@@ -37,6 +37,8 @@
 #include "lbann_config.hpp"
 #include "lbann/distconv.hpp"
 
+#define CONV_DEBUG_FLAG (false)
+
 namespace lbann {
 
 /// Convolution layer
@@ -196,25 +198,37 @@ class convolution_layer : public base_convolution_layer {
 
  protected:
 
+#ifdef LBANN_HAS_DISTCONV
+  void early_terminate() {
+    if (getenv("DISTCONV_EARLY_TERMINATE")) {
+      --m_exit_count;
+      if (m_exit_count == 0) {
+        MPIPrintStreamDebug() << "Early terminate\n";
+        MPI_Barrier(MPI_COMM_WORLD);
+        MPI_Finalize();
+        cudaDeviceReset();
+        exit(0);
+      }
+    }
+  }
+#endif
+  
   void fp_compute() override {
     if(this->m_using_gpus) {
 #ifdef LBANN_HAS_DISTCONV
       if (m_distconv_enabled) {
-        if (false) {
-          apply_convolution_cudnn(true);        
-          apply_convolution_distconv();
-          MPI_Barrier(MPI_COMM_WORLD);
-          exit(0);
-          //apply_bias_distconv();        
-          apply_bias_cudnn();
-        } else {
-          apply_convolution_distconv();
-          apply_bias_distconv();
-          // activations may be updated with bias, so its copy should
-          // be done after applying bias
-          MPIPrintStreamDebug() << "Copying back to sample parallel\n";
+        early_terminate();
+        apply_convolution_distconv();
+        apply_bias_distconv();
+        // activations may be updated with bias, so its copy should
+        // be done after applying bias
+        if (m_child_copy_required) {
+          MPIPrintStreamDebug() << "Copying back to sample parallel\n";          
+          assert0(dc::tensor::View(
+              m_activations_copyout, m_activations_d[0].get_data(0)));
           assert0(dc::tensor::Copy(
-              m_activations_e, m_activations_t));
+              m_activations_copyout, m_activations_t));
+          dump_tensor(m_activations_copyout, "activations_original.txt"); 
         }
       } else {
         apply_convolution_cudnn(true);
@@ -235,27 +249,8 @@ class convolution_layer : public base_convolution_layer {
 #ifdef LBANN_HAS_DISTCONV
       if (m_distconv_enabled) {
         m_prev_error_signals_redistributed = false;
-        
-#ifdef DEBUG_COMPUTE_GRADIENTS
-        compute_gradients_cudnn(false);
-#endif
-        if (true) {
-          compute_gradients_distconv();
-          apply_transposed_convolution_distconv();
-          --m_exit_count;
-#if 0          
-          if (m_exit_count == 0) {
-            MPIPrintStreamDebug() << "exiting for profiling\n";
-            cudaDeviceReset();
-            MPI_Barrier(MPI_COMM_WORLD);
-            exit(0);
-          }
-#endif          
-        } else {
-          compute_gradients_cudnn(false);
-          apply_transposed_convolution_distconv();
-          //apply_transposed_convolution_cudnn(false);
-        }
+        compute_gradients_distconv();
+        apply_transposed_convolution_distconv();
       } else {
         compute_gradients_cudnn(false);
         apply_transposed_convolution_cudnn(false);
@@ -273,183 +268,6 @@ class convolution_layer : public base_convolution_layer {
   void setup_gpu() override {
     std::cerr << "setup gpu\n";
     base_convolution_layer::setup_gpu();
-#ifdef LBANN_HAS_DISTCONV
-    setup_tensors();
-#endif
-  }
-
-  void setup_tensors() {
-#ifndef LBANN_HAS_DISTCONV
-    throw lbann_exception(
-        std::string {} + __FILE__ + " " + std::to_string(__LINE__) + " :: " +
-        "Layer: DISTCONV not detected");
-#else
-    MPIPrintStreamDebug() << "convolution: setup_tensors\n";
-
-    std::stringstream ss;
-    dc::util::print_vector(ss, m_kernel_dims.begin(), m_kernel_dims.end());
-    MPIPrintStreamDebug()
-        << "m_kernel_dims: " << ss.str() << "\n";
-
-    if (!(m_kernel_dims[2] == m_kernel_dims[3] &&
-          m_kernel_dims[2] == m_pads[0] * 2 + 1 &&
-          m_kernel_dims[3] == m_pads[1] * 2 + 1)) {
-      MPIPrintStreamDebug() << "Unsupported as padding does not match the kernel size\n";
-      return;
-    }
-
-    Array4 input_tensor_shape = {m_prev_neuron_dims[2], m_prev_neuron_dims[1],
-                                 m_prev_neuron_dims[0],
-                                 this->m_model->get_max_mini_batch_size()};
-
-    if (!(input_tensor_shape[0] % m_strides[1] == 0 &&
-          input_tensor_shape[1] % m_strides[0] == 0)) {
-      MPIPrintStreamDebug() << "Unsupported as tensor dimensions not devisible by strides\n";
-      return;
-    }
-    
-    m_distconv_enabled = true;
-
-    MPIPrintStreamDebug() << "convolution: distconv enabled\n";
-
-    MPIPrintStreamDebug()
-        << "input tensor shape: " << input_tensor_shape
-        << ", desc: " << dc::util::tostring(this->m_prev_activations_cudnn_desc)
-        << "\n";
-    
-    Array4 input_local_shape = input_tensor_shape;
-    // Assuming single GPU per rank
-    input_local_shape[3] = m_max_mini_batch_size_per_gpu;
-    Array4 division_block_size = {1, 1, 1, 1};
-
-    LocaleMPI loc(m_comm->get_model_comm().comm);
-    // Sample distribution
-    Array4 sample_decomposition = {1, 1, 1, m_comm->get_procs_per_model()};
-
-    m_prev_activations_e = ConstTensorDev(input_tensor_shape, loc,
-                                          Dist(sample_decomposition),
-                                          input_local_shape,
-                                          division_block_size);
-
-    // View must be set every time fp is called, but it's also
-    // necessary to call here as we need its memory property to be set
-    // for setting up CUDNN tensor descriptors
-    assert0(dc::tensor::View(
-        m_prev_activations_e,
-        m_prev_activations_d[0].get_locked_data(0)));
-#if 0    
-    MPIPrintStreamDebug() << "prev_activations_e: " <<
-        m_prev_activations_e
-                          << ", ptr: " << m_prev_activations_e.get_data()
-                          << "\n";
-#endif    
-
-    // 1D decomposition at the H dimension
-    Array4 spatial_decomposition = {1, m_comm->get_procs_per_model(), 1, 1};
-    Array4 overlap = {m_pads[1], m_pads[0], 0, 0};
-    Array4 spatial_block_size = {m_strides[1], m_strides[0], 1, 1};
-    Array4 spatial_local_size = {0, 0, 0, 0};
-
-    m_prev_activations_t = TensorDev(input_tensor_shape, loc,
-                                     Dist(spatial_decomposition, overlap),
-                                     spatial_local_size, spatial_block_size);
-    m_prev_activations_t.allocate();
-    m_prev_activations_t.zero();
-    MPIPrintStreamDebug() << "prev_activations_t: " <<
-        m_prev_activations_t << ", mem: " <<
-        m_prev_activations_t.get_data() << "\n";
-
-    Array4 output_tensor_shape = {m_neuron_dims[2], m_neuron_dims[1],
-                                  m_neuron_dims[0],
-                                  this->m_model->get_max_mini_batch_size()};
-    Array4 output_local_shape = output_tensor_shape;
-    output_local_shape[3] = m_max_mini_batch_size_per_gpu;
-
-    m_activations_t = TensorDev(output_tensor_shape,
-                                loc, Dist(spatial_decomposition));
-
-    m_activations_t.allocate();
-
-    m_activations_e = TensorDev(output_tensor_shape, loc,
-                                Dist(sample_decomposition),
-                                output_local_shape,
-                                division_block_size);
-
-    // prev_error_signals
-    m_prev_error_signals_t = TensorDev(output_tensor_shape, loc,
-                                       Dist(spatial_decomposition, overlap));
-    m_prev_error_signals_t.allocate();
-    m_prev_error_signals_t.zero();
-    m_prev_error_signals_e = ConstTensorDev(output_tensor_shape, loc,
-                                            Dist(sample_decomposition),
-                                            output_local_shape,
-                                            division_block_size);
-    
-    assert0(dc::tensor::View(
-        m_prev_error_signals_e,
-        m_prev_error_signals_d[0].get_locked_data(0)));
-
-    MPIPrintStreamDebug() << "prev_error_signals_e: " <<
-        m_prev_error_signals_e << "\n";
-
-    // error_signals
-    m_error_signals_e = TensorDev(input_tensor_shape, loc,
-                                  Dist(sample_decomposition),
-                                  input_local_shape, division_block_size);
-    m_error_signals_t = TensorDev(input_tensor_shape, loc,
-                                  Dist(spatial_decomposition),
-                                  spatial_local_size, spatial_block_size);
-    m_error_signals_t.allocate();
-
-
-    Array4 kernel_shape = {m_kernel_dims[3], m_kernel_dims[2],
-                           m_kernel_dims[1], m_kernel_dims[0]};
-    
-    m_kernel_t = TensorDev(kernel_shape, loc, Dist());
-    assert0(dc::tensor::View(
-        m_kernel_t, m_weights[0]->get_values_gpu()[0]));
-    m_kernel_gradient_e = TensorDev(kernel_shape, loc, Dist());
-    assert0(dc::tensor::View(
-        m_kernel_gradient_e, m_kernel_gradient_d.get_data(0)));
-    
-    m_conv = new dc::Convolution<dc::cudnn::BackendCUDNN>(
-        *this->m_cudnn->get_distconv_backend());
-
-    m_conv->setup(m_prev_activations_t,
-                  m_kernel_t, m_activations_t,
-                  m_error_signals_t, m_kernel_gradient_e,
-                  m_prev_error_signals_t,
-                  m_pads[0], m_pads[1],
-                  m_strides[0], m_strides[1],
-                  m_fwd_algo, m_bwd_data_algo,
-                  m_bwd_filter_algo);
-
-    // Bias tensor. Shared by all procs
-    MPIPrintStreamDebug()
-        << "Bias desc: "
-        << dc::util::tostring(m_bias_cudnn_desc)
-        << ", bias factor: " << m_bias_scaling_factor
-        << "\n";
-    if (m_bias_scaling_factor != DataType(0)) {
-      Array4 bias_shape = {1, 1, this->m_neuron_dims[0], 1};
-      m_bias_e = TensorDev(bias_shape, loc, Dist());
-      assert0(dc::tensor::View(m_bias_e, m_weights[1]->get_values_gpu()[0]));
-      MPIPrintStreamDebug()
-          << "Bias tensor: " << m_bias_e << "\n";
-      m_conv->setup_bias(m_bias_e);
-
-      // Bias backprop
-      optimizer* bias_optimizer = m_weights[1]->get_optimizer();      
-      if (bias_optimizer != nullptr) {
-        m_bias_gradient_e = TensorDev(bias_shape, loc, Dist());
-        assert0(dc::tensor::View(m_bias_gradient_e,
-                                 m_bias_gradient_d.get_data(0)));
-        m_conv->setup_bias_gradient(m_bias_gradient_e);
-      }
-    }
-        
-        
-#endif
   }
   
   void apply_convolution_distconv() {
@@ -458,39 +276,33 @@ class convolution_layer : public base_convolution_layer {
         std::string {} + __FILE__ + " " + std::to_string(__LINE__) + " :: " +
         "Layer: DISTCONV not detected");
 #else
-    MPIPrintStreamDebug() << "Forward convolution\n";
+    MPIPrintStreamDebug() << get_name() << ": Forward convolution\n";
+    // there may only be a smaller number of samples for the last
+    // mini-batch iteration
+    m_conv->set_num_samples(this->m_model->get_current_mini_batch_size());
     
-    assert0(dc::tensor::View(
-        m_prev_activations_e,
-        m_prev_activations_d[0].get_locked_data(0)));
-    MPIPrintStreamDebug() << "prev_activations_e: " <<
-        m_prev_activations_e
-                          << ", ptr: " << m_prev_activations_e.get_data()
-                          << "\n";
-    
-    MPIPrintStreamDebug() << "Copying from data parallel to model parallel\n";
+    if (m_parent_copy_required) {
+      MPIPrintStreamDebug() << "Copying to spatial decomposition\n";
+      assert0(dc::tensor::View(
+          m_prev_activations_const_view,
+          m_prev_activations_d[0].get_locked_data(0)));
+      //dump_tensor(m_prev_activations_const_view, "prev_activations_original.txt");
+      assert0(dc::tensor::Copy(
+          m_prev_activations_t, m_prev_activations_const_view));
+    } else {
+      MPIPrintStreamDebug()
+          << "Directly reading activations of previous layer\n";
+    }
 
-    dump_tensor(m_prev_activations_e, "prev_activations_original.txt");
-    
-    assert0(dc::tensor::Copy(
-        m_prev_activations_t, m_prev_activations_e));
-
-    dump_tensor(m_prev_activations_t, "prev_activations_spatial.txt");    
+    //dump_tensor(m_activations_t, "prev_activations_spatial.txt");    
 
     assert0(dc::tensor::View(
         m_kernel_t, m_weights[0]->get_values_gpu()[0]));
 
-    // there may only be a smaller number of samples for the last
-    // mini-batch iteration
-    m_conv->set_num_samples(this->m_model->get_current_mini_batch_size());
-    m_conv->forward(1.0, m_prev_activations_t, m_kernel_t, 0.0, m_activations_t);
+    m_conv->forward(DataType(1.0), m_prev_activations_t, m_kernel_t,
+                    DataType(0.0), m_activations_t);
 
-    dump_tensor(m_activations_t, "activations_spatial.txt");        
-
-    assert0(dc::tensor::View(
-        m_activations_e, m_activations_d[0].get_data(0)));
-
-    dump_tensor(m_activations_e, "activations_original.txt");        
+    //dump_tensor(m_activations_t, "activations_spatial.txt");        
 #endif
   }
 
@@ -507,7 +319,7 @@ class convolution_layer : public base_convolution_layer {
     assert0(dc::tensor::View(
         m_bias_e, m_weights[1]->get_values_gpu()[0]));
     m_conv->apply_bias(m_bias_scaling_factor, m_bias_e,
-                       1, m_activations_t);
+                       DataType(1), m_activations_t);
 #endif
   }
 
@@ -523,40 +335,47 @@ class convolution_layer : public base_convolution_layer {
     // kernel: m_weights[0]->get_values_gpu()
     // output: m_error_signals_d[0]
 
-    // Setup views
-    assert0(dc::tensor::View(
-        m_error_signals_e, m_error_signals_d[0].get_data(0)));
     assert0(dc::tensor::View(
         m_kernel_t, m_weights[0]->get_values_gpu()[0]));
-    assert0(dc::tensor::View(
-        m_prev_error_signals_e,
-        m_prev_error_signals_d[0].get_locked_data(0)));
-    
-    // Copy to sample distribution
-    if (!m_prev_error_signals_redistributed) {
-      assert0(dc::tensor::Copy(
-          m_prev_error_signals_t, m_prev_error_signals_e));
-      m_prev_error_signals_redistributed = true;
+
+    if (m_child_copy_required) {
+      if (!m_prev_error_signals_redistributed) {      
+        assert0(dc::tensor::View(
+            m_prev_error_signals_const_view,
+            m_prev_error_signals_d[0].get_locked_data(0)));
+        assert0(dc::tensor::Copy(
+            m_prev_error_signals_t, m_prev_error_signals_const_view));
+        m_prev_error_signals_redistributed = true;
+      }
+      dump_tensor(m_prev_error_signals_const_view,
+                  "prev_error_signals_original.txt");
     }
 
-    dump_tensor(m_prev_error_signals_e,
-                "prev_error_signals_original.txt");
     dump_tensor(m_prev_error_signals_t,
                 "prev_error_signals_spatial.txt");
 
-    assert0(dc::tensor::Copy(
-        m_error_signals_t, m_error_signals_e));
+#if 0    
+    // The beta parameter is non-zero, so need to copy the error signals
+    if (m_parent_copy_required) {
+      assert0(dc::tensor::View(
+          m_error_signals_copyout, m_error_signals_d[0].get_data(0)));
+      assert0(dc::tensor::Copy(
+          m_error_signals_t, m_error_signals_copyout));
+    }
+#endif
+    m_error_signals_t.zero();
 
     MPIPrintStreamDebug() << "Calling backward_data\n";
-    m_conv->backward_data(1.0, m_kernel_t, m_prev_error_signals_t,
-                          1.0, m_error_signals_t);
+    m_conv->backward_data(DataType(1.0), m_kernel_t, m_prev_error_signals_t,
+                          DataType(1.0), m_error_signals_t);
 
     dump_tensor(m_error_signals_t,
                 "error_signals_spatial.txt");
 
-    assert0(distconv::tensor::Copy(
-        m_error_signals_e, m_error_signals_t));
-    
+    if (m_parent_copy_required) {
+      assert0(distconv::tensor::Copy(
+          m_error_signals_copyout, m_error_signals_t));
+    }
 #endif    
   }
 
@@ -568,9 +387,11 @@ class convolution_layer : public base_convolution_layer {
 #else
     MPIPrintStreamDebug() << "Compute gradients\n";
 
-    assert0(dc::tensor::View(
-        m_prev_error_signals_e,
-        m_prev_error_signals_d[0].get_locked_data(0)));
+    if (m_child_copy_required || CONV_DEBUG_FLAG) {
+      assert0(dc::tensor::View(
+          m_prev_error_signals_const_view,
+          m_prev_error_signals_d[0].get_locked_data(0)));
+    }
 
     const int effective_mini_batch_size =
         this->m_model->get_effective_mini_batch_size();    
@@ -579,17 +400,18 @@ class convolution_layer : public base_convolution_layer {
     if (bias_optimizer != nullptr && m_bias_scaling_factor != DataType(0)) {
       MPIPrintStreamDebug() << "Compute bias gradients\n";      
       // Copy to sample distribution
-      assert0(dc::tensor::Copy(
-          m_prev_error_signals_t, m_prev_error_signals_e));
-      m_prev_error_signals_redistributed = true;
+      if ((m_child_copy_required || CONV_DEBUG_FLAG) && !m_prev_error_signals_redistributed) {
+        assert0(dc::tensor::Copy(
+            m_prev_error_signals_t, m_prev_error_signals_const_view));
+        m_prev_error_signals_redistributed = true;
+      }
       assert0(dc::tensor::View(m_bias_gradient_e,
                                m_bias_gradient_d.get_data(0)));
-      m_conv->backward_bias(1.0, m_prev_error_signals_t,
-                            0.0, m_bias_gradient_e, false);
+      m_conv->backward_bias(DataType(1.0), m_prev_error_signals_t,
+                            DataType(0.0), m_bias_gradient_e, false);
       const DataType bias_scale = m_bias_scaling_factor / effective_mini_batch_size;
       bias_optimizer->add_to_gradient_staging(m_bias_gradient_d,
                                               bias_scale);
-      
     }
 
     optimizer* kernel_optimizer = m_weights[0]->get_optimizer();
@@ -600,45 +422,249 @@ class convolution_layer : public base_convolution_layer {
     assert0(dc::tensor::View(
         m_kernel_gradient_e, m_kernel_gradient_d.get_data(0)));
     
-
-#ifdef DEBUG_COMPUTE_GRADIENTS
-    dump_tensor(m_kernel_gradient_e,
-                "kernel_gradients_original.txt");
-#endif
-
     // Copy to sample distribution
-    if (!m_prev_error_signals_redistributed) {
+    if ((m_child_copy_required || CONV_DEBUG_FLAG) && !m_prev_error_signals_redistributed) {
       assert0(dc::tensor::Copy(
-          m_prev_error_signals_t, m_prev_error_signals_e));
+          m_prev_error_signals_t, m_prev_error_signals_const_view));
       m_prev_error_signals_redistributed = true;
     }
 
-#ifdef DEBUG_COMPUTE_GRADIENTS
-    Array4 kernel_shape = {m_kernel_dims[3], m_kernel_dims[2],
-                           m_kernel_dims[1], m_kernel_dims[0]};
-    LocaleMPI loc(m_comm->get_model_comm().comm);    
-    TensorDev kg = TensorDev(kernel_shape, loc, Dist());
-    kg.allocate();
-    m_conv->backward_filter(1.0, m_prev_activations_t,
-                            m_prev_error_signals_t, 0,
-                            kg,
-                            true);
-    dump_tensor(kg, "kernel_gradients_spatial.txt");
-#else
-    m_conv->backward_filter(1.0, m_prev_activations_t,
-                            m_prev_error_signals_t, 0,
-                            m_kernel_gradient_e,
-                            false);
+    m_conv->backward_filter(DataType(1.0), m_prev_activations_t,
+                            m_prev_error_signals_t, DataType(0),
+                            m_kernel_gradient_e, false);
 
     // Add gradient contribution
     const DataType kernel_scale = DataType(1) / effective_mini_batch_size;
     kernel_optimizer->add_to_gradient_staging(m_kernel_gradient_d,
                                               kernel_scale);
 #endif    
-
-#endif    
   }
 
+#ifdef LBANN_HAS_DISTCONV
+ public:
+  bool using_distconv() const override {
+    if (!(m_kernel_dims[2] == m_kernel_dims[3] &&
+          m_kernel_dims[2] == m_pads[0] * 2 + 1 &&
+          m_kernel_dims[3] == m_pads[1] * 2 + 1)) {
+      MPIPrintStreamDebug() << "Unsupported as padding does not match the kernel size\n";
+      return false;
+    }
+    if (!(m_prev_neuron_dims[2] % m_strides[1] == 0 &&
+          m_prev_neuron_dims[1] % m_strides[0] == 0)) {
+      MPIPrintStreamDebug() << "Unsupported as tensor dimensions not devisible by strides\n";
+      return false;
+    }
+    return true;
+  }
+  
+  Array4 get_prev_activations_overlap() const override {
+    if (using_distconv()) {
+      int stencil_h = (m_kernel_dims[2] - 1) / 2;
+      int stencil_w = (m_kernel_dims[3] - 1) / 2;
+      return Array4({stencil_w, stencil_h, 0, 0});
+    } else {
+      return Array4(0);
+    }
+  }
+
+  Array4 get_activations_overlap() const override {
+    return Array4(0);
+  }
+
+  Array4 get_prev_error_signals_overlap() const override {
+    if (using_distconv()) {
+      return get_prev_activations_overlap();
+    } else {
+      return Array4(0);
+    }
+  }
+
+  Array4 get_error_signals_overlap() const override {
+    return Array4(0);
+  }
+
+  void setup_tensor_distribution_init(
+      std::map<const Layer*, std::array<Dist, 4>> &dists,      
+      std::map<Dist*, std::set<Dist*>> &invariants,
+      std::set<Dist*> &updated,
+      std::set<Dist*> &fixed) override {
+    Layer::setup_tensor_distribution_init(
+        dists, invariants, updated, fixed);
+    if (using_distconv()) {
+      int stencil_h = (m_kernel_dims[2] - 1) / 2;
+      int stencil_w = (m_kernel_dims[3] - 1) / 2;
+      Array4 overlap({stencil_w, stencil_h, 0, 0});
+      auto &prev_activations_dist = dists[this][0];
+      prev_activations_dist.set_overlap(overlap);
+      updated.insert(&prev_activations_dist);
+      fixed.insert(&prev_activations_dist);
+      auto &prev_error_signals_dist = dists[this][3];      
+      prev_error_signals_dist.set_overlap(overlap);
+      updated.insert(&prev_error_signals_dist);
+      fixed.insert(&prev_error_signals_dist);
+    }
+  }
+
+  Array4 get_strides() const override {
+    return Array4({m_strides[1], m_strides[0], 1, 1});
+  }
+
+  void setup_tensors_fwd(const std::array<Dist, 4> &dists) override {    
+    Layer::setup_tensors_fwd(dists);
+    if (!m_distconv_enabled) return;
+    
+    std::stringstream ss;
+    dc::util::print_vector(ss, m_kernel_dims.begin(), m_kernel_dims.end());
+    MPIPrintStreamDebug()
+        << "m_kernel_dims: " << ss.str() << "\n";
+
+    const Array4 input_tensor_shape =
+        {m_prev_neuron_dims[2], m_prev_neuron_dims[1],
+         m_prev_neuron_dims[0], this->m_model->get_max_mini_batch_size()};
+    const LocaleMPI loc(m_comm->get_model_comm().comm, false);
+    const Array4 sample_block_size = {1, 1, 1, 1};    
+    const Dist sample_dist = Dist({1, 1, 1, m_comm->get_procs_per_model()});
+    Array4 input_local_shape = input_tensor_shape;
+    // Assuming single GPU per rank
+    input_local_shape[3] = m_max_mini_batch_size_per_gpu;
+    const Array4 spatial_local_size = {0, 0, 0, 0};
+    const Array4 output_tensor_shape =
+        {m_neuron_dims[2], m_neuron_dims[1],
+         m_neuron_dims[0], this->m_model->get_max_mini_batch_size()};
+    Array4 output_local_shape = output_tensor_shape;
+    output_local_shape[3] = m_max_mini_batch_size_per_gpu;
+    
+    if (m_parent_copy_required) {
+      MPIPrintStreamDebug() << "copying prev activations required\n";      
+      m_prev_activations_const_view = ConstTensorDev(input_tensor_shape, loc,
+                                                     sample_dist,
+                                                     input_local_shape,
+                                                     sample_block_size);
+      m_prev_activations_t = TensorDev(input_tensor_shape, loc, dists[0],
+                                       spatial_local_size, m_input_decomposition_block);
+      assert0(m_prev_activations_t.allocate());
+      m_prev_activations_t.zero();      
+    } else {
+      MPIPrintStreamDebug() << "directly using prev activations: "
+                            << get_parent_layers()[0]->get_activations_t() << "\n";
+      m_prev_activations_t = get_parent_layers()[0]->get_activations_t();      
+      assert_always(m_prev_activations_t.get_distribution() == dists[0]);
+      assert_always(m_prev_activations_t.get_requested_local_block()
+                    == m_input_decomposition_block);
+    }
+
+    m_activations_t = TensorDev(output_tensor_shape,
+                                loc, dists[1], spatial_local_size,
+                                m_output_decomposition_block);
+    assert0(m_activations_t.allocate());
+    m_activations_t.zero();
+
+    if (m_child_copy_required) {
+      m_activations_copyout = TensorDev(output_tensor_shape, loc, sample_dist,
+                                        output_local_shape, sample_block_size);
+    }
+
+    Array4 kernel_shape = {m_kernel_dims[3], m_kernel_dims[2],
+                           m_kernel_dims[1], m_kernel_dims[0]};
+    
+    m_kernel_t = TensorDev(kernel_shape, loc, Dist());
+    assert0(dc::tensor::View(
+        m_kernel_t, m_weights[0]->get_values_gpu()[0]));
+    m_kernel_gradient_e = TensorDev(kernel_shape, loc, Dist());
+    assert0(dc::tensor::View(
+        m_kernel_gradient_e, m_kernel_gradient_d.get_data(0)));
+    
+    m_conv = new dc::Convolution<dc::cudnn::BackendCUDNN>(
+        *this->m_cudnn->get_distconv_backend());
+
+    // Bias tensor. Shared by all procs
+    MPIPrintStreamDebug()
+        << "Bias desc: "
+        << dc::util::tostring(m_bias_cudnn_desc)
+        << ", bias factor: " << m_bias_scaling_factor
+        << "\n";
+    if (m_bias_scaling_factor != DataType(0)) {
+      Array4 bias_shape = {1, 1, m_neuron_dims[0], 1};
+      m_bias_e = TensorDev(bias_shape, loc, Dist());
+      assert0(dc::tensor::View(m_bias_e, m_weights[1]->get_values_gpu()[0]));
+      MPIPrintStreamDebug()
+          << "Bias tensor: " << m_bias_e << "\n";
+      m_conv->setup_bias(m_bias_e);
+
+      // Bias backprop
+      optimizer* bias_optimizer = m_weights[1]->get_optimizer();      
+      if (bias_optimizer != nullptr) {
+        m_bias_gradient_e = TensorDev(bias_shape, loc, Dist());
+        assert0(dc::tensor::View(m_bias_gradient_e,
+                                 m_bias_gradient_d.get_data(0)));
+        m_conv->setup_bias_gradient(m_bias_gradient_e);
+      }
+    }
+  }
+
+  void setup_tensors_bwd(const std::array<Dist, 4> &dists) override {
+    Layer::setup_tensors_bwd(dists);        
+    // REFACTORING: this is repeated again
+    const Array4 input_tensor_shape =
+        {m_prev_neuron_dims[2], m_prev_neuron_dims[1],
+         m_prev_neuron_dims[0], this->m_model->get_max_mini_batch_size()};
+    const LocaleMPI loc(m_comm->get_model_comm().comm, false);
+    const Array4 sample_block_size = {1, 1, 1, 1};    
+    const Dist sample_dist = Dist({1, 1, 1, m_comm->get_procs_per_model()});
+    Array4 input_local_shape = input_tensor_shape;
+    // Assuming single GPU per rank
+    input_local_shape[3] = m_max_mini_batch_size_per_gpu;
+    const Array4 spatial_local_size = {0, 0, 0, 0};
+    const Array4 output_tensor_shape =
+        {m_neuron_dims[2], m_neuron_dims[1],
+         m_neuron_dims[0], this->m_model->get_max_mini_batch_size()};
+    Array4 output_local_shape = output_tensor_shape;
+    output_local_shape[3] = m_max_mini_batch_size_per_gpu;
+    
+    // prev_error_signals
+    if (m_child_copy_required || CONV_DEBUG_FLAG) {
+      m_prev_error_signals_const_view = ConstTensorDev(output_tensor_shape, loc,
+                                                       sample_dist,
+                                                       output_local_shape,
+                                                       sample_block_size);
+      m_prev_error_signals_t = TensorDev(output_local_shape, loc,
+                                         dists[3],
+                                         spatial_local_size,
+                                         m_output_decomposition_block);
+      assert0(m_prev_error_signals_t.allocate());
+      m_prev_error_signals_t.zero();
+    } else {
+      m_prev_error_signals_t = get_child_layers()[0]->get_error_signals_t();
+      MPIPrintStreamDebug() << get_name() << ": directly using prev error signals\n";
+      assert_always(m_prev_error_signals_t.get_distribution() ==
+                    dists[3]);
+      assert_always(m_prev_error_signals_t.get_requested_local_block() ==
+                    m_output_decomposition_block);
+    }
+    
+    // error_signals
+    m_error_signals_t = TensorDev(input_tensor_shape, loc,
+                                  dists[2], spatial_local_size,
+                                  m_input_decomposition_block);
+    assert0(m_error_signals_t.allocate());
+    m_error_signals_t.zero();
+
+    if (m_parent_copy_required) {
+      m_error_signals_copyout = TensorDev(input_tensor_shape, loc, sample_dist,
+                                           input_local_shape, sample_block_size);
+    }
+
+    m_conv->setup(m_prev_activations_t,
+                  m_kernel_t, m_activations_t,
+                  m_error_signals_t, m_kernel_gradient_e,
+                  m_prev_error_signals_t,
+                  m_pads[0], m_pads[1],
+                  m_strides[0], m_strides[1],
+                  m_fwd_algo, m_bwd_data_algo,
+                  m_bwd_filter_algo);
+  }
+  
+ protected:
   template <typename Tensor>
   void dump_tensor(const Tensor &t, const std::string &path) {
     if (m_dump_tensors) {
@@ -646,41 +672,22 @@ class convolution_layer : public base_convolution_layer {
     }
   }
 
-#ifdef LBANN_HAS_DISTCONV
-  bool m_distconv_enabled = false;
   dc::Convolution<dc::cudnn::BackendCUDNN> *m_conv;
-  /** Previous activation tensor */
-  // Created once, view initialized at fp_setup_data
-  TensorDev m_prev_activations_t;
-  /** View to Elemental matrix of previous activations */
-  // Created once, copied from m_prev_activations_t at fp_setup_data
-  ConstTensorDev m_prev_activations_e;
-  /** Activation tensor */
-  // Created once, copied back to m_activations_e after fp_compute
-  TensorDev m_activations_t;
-  /** Elemental-format activation matrix */  
-  TensorDev m_activations_e;
-  /** Previous error signal tensor */
-  TensorDev m_prev_error_signals_t;
-  /** View to Elemental matrix */
-  ConstTensorDev m_prev_error_signals_e;
-  /** Error signal tensor */
-  TensorDev m_error_signals_t;
-  /** Elemental-format matrix */
-  TensorDev m_error_signals_e;
   TensorDev m_kernel_t;
   TensorDev m_kernel_gradient_e;
   // Bias
   TensorDev m_bias_e;
   TensorDev m_bias_gradient_e;
+  // Algorithms
   std::string m_fwd_algo = "DEFAULT";
   std::string m_bwd_data_algo = "DEFAULT";
   std::string m_bwd_filter_algo = "DEFAULT";
 
   bool m_prev_error_signals_redistributed = false;
 
-  //bool m_dump_tensors = true;
-  bool m_dump_tensors = false;  
+  // For debugging
+  bool m_dump_tensors = false;
+  int m_exit_count = 5;
 #endif // LBANN_HAS_DISTCONV
   
 

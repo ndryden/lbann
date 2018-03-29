@@ -36,9 +36,13 @@
 #include "lbann/utils/cudnn_wrapper.hpp"
 #include "lbann/utils/timer.hpp"
 #include "lbann/io/persist.hpp"
+#include "lbann/distconv.hpp"
 #include <lbann.pb.h>
 #include <string>
 #include <vector>
+#include <set>
+#include <map>
+#include <array>
 
 namespace lbann {
 
@@ -526,6 +530,84 @@ class Layer {
    *  human-readable, name.
    */
   std::string m_name;
+
+#ifdef LBANN_HAS_DISTCONV
+ public:
+  virtual bool using_distconv() const { return false; }
+  virtual void setup_tensor_distribution_init(
+      std::map<const Layer*, std::array<Dist, 4>> &dists, 
+      std::map<Dist*, std::set<Dist*>> &invariants,
+      std::set<Dist*> &updated,
+      std::set<Dist*> &fixed);
+  virtual void setup_tensor_distribution_add_adjacent_invariants(
+      std::map<const Layer*, std::array<Dist, 4>> &dists,
+      std::map<Dist*, std::set<Dist*>> &invariants);
+  virtual void setup_tensor_distribution_block();
+  // TODO: use dists
+  virtual void setup_tensors_fwd(const std::array<Dist, 4> &dists);
+  virtual void setup_tensors_bwd(const std::array<Dist, 4> &dists);
+  virtual Array4 get_prev_activations_overlap() const;
+  virtual Array4 get_activations_overlap() const;  
+  virtual Array4 get_prev_error_signals_overlap() const;
+  virtual Array4 get_error_signals_overlap() const;
+  virtual Array4 get_input_decomposition_block() const;
+  virtual Array4 get_output_decomposition_block() const;
+#if 0
+  virtual const Dist &get_prev_activations_distribution() const {
+    return m_prev_activations_dist;
+  }
+  virtual const Dist &get_activations_distribution() const {
+    return m_activations_dist;
+  }
+  virtual const Dist &get_prev_error_signals_distribution() const {
+    return m_prev_error_signals_dist;
+  }
+  virtual const Dist &get_error_signals_distribution() const {
+    return m_error_signals_dist;
+  }
+#endif
+  
+  // REFACTORING: returning non-const tensor should be protected
+  virtual const TensorDev &get_activations_t() const;
+  virtual const TensorDev &get_error_signals_t() const;  
+  //virtual ConstTensorDev get_activations_const_view() const;
+  //virtual ConstTensorDev get_prev_activations_const_view() const;
+  
+ protected:
+
+  virtual Array4 get_strides() const;
+
+  bool m_distconv_enabled = false;
+  bool m_parent_copy_required = true;
+  bool m_child_copy_required = true;
+#if 0
+  Dist m_prev_activations_dist;
+  Dist m_activations_dist;
+  Dist m_error_signals_dist;
+  Dist m_prev_error_signals_dist;
+#endif
+  Array4 m_input_decomposition_block;
+  Array4 m_output_decomposition_block;  
+  /** Previous activation tensor */
+  // Created once, view initialized at fp_setup_data
+  TensorDev m_prev_activations_t;
+  /** View to Elemental matrix of previous activations */
+  // Created once, copied from m_prev_activations_t at fp_setup_data
+  ConstTensorDev m_prev_activations_const_view;
+  /** Activation tensor */
+  // Created once, copied back to m_activations_e after fp_compute
+  TensorDev m_activations_t;
+  /** Elemental-format activation matrix */  
+  TensorDev m_activations_copyout;
+  /** Previous error signal tensor */
+  TensorDev m_prev_error_signals_t;
+  /** View to Elemental matrix */
+  ConstTensorDev m_prev_error_signals_const_view;
+  /** Error signal tensor */
+  TensorDev m_error_signals_t;
+  /** Elemental-format matrix */
+  TensorDev m_error_signals_copyout;
+#endif // LBANN_HAS_DISTCONV
 
  private:
 
