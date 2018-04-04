@@ -29,6 +29,8 @@
 
 #cmakedefine LBANN_NVPROF
 
+#cmakedefine LBANN_HAS_DISTCONV
+
 // Define the LBANN datatype
 namespace lbann
 {

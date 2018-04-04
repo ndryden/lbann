@@ -30,6 +30,7 @@
 #define CUDNN_WRAPPER_HPP_INCLUDED
 
 #include <vector>
+#include "lbann_config.hpp"
 #include "lbann/base.hpp"
 #include "lbann/comm.hpp"
 #include "lbann/utils/exception.hpp"
@@ -58,6 +59,10 @@
 //#include "nccl1_compat.h"
 //#include "common.h"
 #endif // #ifdef LBANN_HAS_NCCL2
+
+#ifdef LBANN_HAS_DISTCONV
+#include "lbann/distconv.hpp"
+#endif
 
 #endif // #ifdef LBANN_HAS_CUDNN
 
@@ -394,6 +399,12 @@ class cudnn_manager {
 
   bool is_nccl_used() { return m_nccl_used; }
 
+#ifdef LBANN_HAS_DISTCONV
+  distconv::cudnn::BackendCUDNN *get_distconv_backend() const {
+    return m_distconv_be;
+  }
+#endif
+
  private:
 
   /** LBANN communicator. */
@@ -428,6 +439,10 @@ class cudnn_manager {
   std::vector<ncclComm_t> m_nccl_comm;
   ncclDataType_t nccl_datatype();
 #endif // LBANN_HAS_NCCL2
+
+#ifdef LBANN_HAS_DISTCONV
+  distconv::cudnn::BackendCUDNN *m_distconv_be;
+#endif 
 
 #endif // #ifdef LBANN_HAS_CUDNN
 };

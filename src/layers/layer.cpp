@@ -1247,6 +1247,149 @@ void Layer::set_layer_pointers(std::vector<Layer*> layers) {
   }
 }
 
+#ifdef LBANN_HAS_DISTCONV
+void Layer::setup_tensor_distribution_init(
+    std::map<const Layer*, std::array<Dist, 4>> &dists,
+    std::map<Dist*, std::set<Dist*>> &invariants,
+    std::set<Dist*> &updated,
+    std::set<Dist*> &fixed) {
+  Dist dist = using_distconv() ?
+      Dist({1, m_comm->get_procs_per_model(), 1, 1}) :
+      Dist({1, 1, 1, m_comm->get_procs_per_model()});
+  std::array<Dist, 4> layer_dists = {dist, dist, dist, dist};
+  dists.insert(std::make_pair(this, layer_dists));
+  invariants.insert(std::make_pair(&dists[this][0], std::set<Dist*>()));
+  invariants.insert(std::make_pair(&dists[this][1], std::set<Dist*>()));
+  invariants.insert(std::make_pair(&dists[this][2], std::set<Dist*>()));
+  invariants.insert(std::make_pair(&dists[this][3], std::set<Dist*>()));
+}
 
+void Layer::setup_tensor_distribution_add_adjacent_invariants(
+    std::map<const Layer*, std::array<Dist, 4>> &dists,
+    std::map<Dist*, std::set<Dist*>> &invariants) {
+  if (!using_distconv()) return;
+  auto &layer_dists = dists[this];      
+  if (get_child_layers().size() > 0) {
+    auto child = get_child_layers()[0];
+    if (child->using_distconv()) {
+      invariants[&layer_dists[1]].insert(
+          &dists[child][0]);
+      invariants[&layer_dists[3]].insert(
+          &dists[child][2]);
+    }
+  }
+  if (get_parent_layers().size() > 0) {
+    auto parent = get_parent_layers()[0];
+    if (parent->using_distconv()) {
+      invariants[&layer_dists[0]].insert(
+          &dists[parent][1]);
+      invariants[&layer_dists[2]].insert(
+          &dists[parent][3]);
+    }
+  }
+}
+
+void Layer::setup_tensor_distribution_block() {
+  m_input_decomposition_block = Array4(1);  
+  m_output_decomposition_block = Array4(1);
+  if (using_distconv()) {
+    const auto *child = get_child_layers()[0];
+    if (child->using_distconv()) {
+      m_output_decomposition_block =
+          child->get_input_decomposition_block();
+    }
+    m_input_decomposition_block =
+        m_output_decomposition_block * get_strides();
+  }
+}
+
+void Layer::setup_tensors_fwd(const std::array<Dist, 4> &dists) {
+  m_distconv_enabled = using_distconv();
+
+  if (m_distconv_enabled) {
+    MPIPrintStreamDebug() << get_name() << ": distconv enabled\n";    
+    const auto &child_layers = get_child_layers();
+    MPIPrintStreamDebug() << ": number of children: "
+                          << child_layers.size()
+                          << ", child name: " << child_layers[0]->get_name()
+                          << "\n";
+    if (child_layers.size() == 1 &&
+        child_layers[0]->using_distconv()) {
+      m_child_copy_required = false;
+    }
+    MPIPrintStreamDebug() << "m_child_copy_required: "
+                          << m_child_copy_required << "\n";
+    const auto &parent_layers = get_parent_layers();
+    MPIPrintStreamDebug() << ": number of parents: "
+                          << parent_layers.size()
+                          << ", parent name: " << parent_layers[0]->get_name()
+                          << "\n";
+    if (parent_layers.size() == 1 &&
+        parent_layers[0]->using_distconv()) {
+      m_parent_copy_required = false;
+    }
+    MPIPrintStreamDebug() << "m_parent_copy_required: "
+                          << m_parent_copy_required << "\n";
+  } else {
+    MPIPrintStreamDebug() << get_name() << ": distconv disabled\n";
+  }
+}
+
+void Layer::setup_tensors_bwd(const std::array<Dist, 4> &dists) {
+}
+
+Array4 Layer::get_prev_activations_overlap() const {
+  return Array4(0);  
+}
+
+Array4 Layer::get_activations_overlap() const {
+#if 0  
+  if (using_distconv() &&
+      get_child_layers().size() > 0) {
+    return get_child_layers()[0]->get_prev_activations_overlap();
+  } else {
+    return Array4(0);
+  }
+#endif
+    return Array4(0);  
+}
+
+Array4 Layer::get_prev_error_signals_overlap() const {
+  return Array4(0);
+}
+
+Array4 Layer::get_error_signals_overlap() const {
+#if 0  
+  if (using_distconv() &&
+      get_parent_layers().size() > 0) {
+    return get_parent_layers()[0]->get_prev_error_signals_overlap();
+  } else {
+    return Array4(0);
+  }
+#endif
+  return Array4(0);  
+}
+
+Array4 Layer::get_input_decomposition_block() const {
+  return m_input_decomposition_block;
+}
+
+Array4 Layer::get_output_decomposition_block() const {
+  return m_output_decomposition_block;
+}
+
+const TensorDev &Layer::get_activations_t() const {
+  return m_activations_t;
+}
+
+const TensorDev &Layer::get_error_signals_t() const {
+  return m_error_signals_t;
+}
+
+Array4 Layer::get_strides() const {
+  return Array4(1);
+}
+
+#endif
 
 }  // namespace lbann

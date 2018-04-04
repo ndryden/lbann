@@ -56,6 +56,7 @@ WITH_CUDA=
 WITH_TOPO_AWARE=ON
 INSTRUMENT=
 WITH_ALUMINUM=OFF
+WITH_DISTCONV=OFF
 WITH_TBINF=OFF
 RECONFIGURE=0
 # In case that autoconf fails during on-demand buid on surface, try the newer
@@ -229,6 +230,9 @@ while :; do
         --with-aluminum)
             WITH_ALUMINUM=ON
             ;;
+		--with-distconv)
+			WITH_DISTCONV=ON
+			;;
         --instrument)
             INSTRUMENT="-finstrument-functions -ldl"
             ;;
@@ -523,7 +527,8 @@ if [ "${CLUSTER}" == "surface" ] || [ "${CLUSTER}" == "ray" ]; then
     if [ "${CLUSTER}" == "ray" ]; then
         export NCCL_DIR=/usr/workspace/wsb/brain/nccl2/nccl_2.0.5-3+cuda8.0_ppc64el
     else
-        export NCCL_DIR=/usr/workspace/wsb/brain/nccl2/nccl-2.0.5+cuda8.0
+        export NCCL_DIR=/usr/workspace/wsb/brain/nccl2/nccl_2.1.15-1+cuda9.1_x86_64
+
     fi
     if [ "${ARCH}" == "ppc64le" ]; then
         export CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda
@@ -532,7 +537,7 @@ if [ "${CLUSTER}" == "surface" ] || [ "${CLUSTER}" == "ray" ]; then
         CUDATOOLKIT_VERSION=$(basename "$CUDA_PATH" | sed 's/cudatoolkit-//')
        export CUDA_TOOLKIT_ROOT_DIR=${CUDA_PATH}
     else
-        CUDATOOLKIT_VERSION=8.0
+        CUDATOOLKIT_VERSION=9.1
         if [ ${USE_MODULES} -ne 0 ]; then
             module load cudatoolkit/${CUDATOOLKIT_VERSION}
         fi
@@ -540,7 +545,7 @@ if [ "${CLUSTER}" == "surface" ] || [ "${CLUSTER}" == "ray" ]; then
     fi
     # Hack for surface
     if [ "${CLUSTER}" == "surface" ]; then
-        CUDATOOLKIT_VERSION=8.0
+        CUDATOOLKIT_VERSION=9.1
         . /usr/share/[mM]odules/init/bash
         module load cudatoolkit/${CUDATOOLKIT_VERSION}
         
@@ -675,6 +680,7 @@ ${CMAKE_PATH}/cmake \
 -D LBANN_WITH_ALUMINUM=${WITH_ALUMINUM} \ 
 -D LBANN_ALUMINUM_DIR=${ALUMINUM_DIR} \
 -D LBANN_BUILT_WITH_SPECTRUM=${WITH_SPECTRUM} \
+-D LBANN_WITH_DISTCONV=${WITH_DISTCONV}
 ${SUPERBUILD_DIR}
 EOF
 )
