@@ -38,7 +38,9 @@ AbsDistMat* weights_initializer::construct_matrix(int height,
 
   // Construct distributed matrix with desired matrix distribution
   AbsDistMat* weights_matrix = nullptr;
-  const El::Grid& grid = m_comm->get_model_grid();
+  const El::Grid& grid = m_use_model_partition ?
+    m_comm->get_model_partition_grid() :
+    m_comm->get_model_grid();
   if (col_dist == El::MC && row_dist == El::MR) {
     weights_matrix = new DistMat(grid);
   }

@@ -126,7 +126,12 @@ int main(int argc, char *argv[]) {
     if (procs_per_model == 0) {
       procs_per_model = comm->get_procs_in_world();
     }
-    comm->split_models(procs_per_model);
+    int model_partitions = 1;
+    // Set up model partitions for the Siamese model.
+    if (pb_model->name() == "siamese_model") {
+      model_partitions = pb_model->siamese().num_heads();
+    }
+    comm->split_models(procs_per_model, model_partitions);
     if (pb_model->num_parallel_readers() > procs_per_model) {
       pb_model->set_num_parallel_readers(procs_per_model);
     }

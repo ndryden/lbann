@@ -193,6 +193,11 @@ class weights {
   void unfreeze() { m_frozen = false; }
   bool is_frozen() const { return m_frozen; }
 
+  /** Return whether to use the model partition grid. */
+  bool get_use_model_partition() const { return m_use_model_partition; }
+  /** Set whether to use the model partition grid. */
+  void set_use_model_partition(bool b) { m_use_model_partition = b; }
+
   bool save_to_checkpoint_shared(persist& p);
   bool load_from_checkpoint_shared(persist& p);
   
@@ -238,6 +243,9 @@ class weights {
 
   /** Avoid weight update if frozen */
   bool m_frozen;
+
+  /** Whether to use the model partition grid. */
+  bool m_use_model_partition = false;
 
   /** Setup GPU objects for weights. */
   virtual void setup_gpu();

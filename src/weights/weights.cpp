@@ -57,7 +57,8 @@ weights::weights(const weights& other)
     m_values(other.m_values),
     m_initializer(other.m_initializer),
     m_optimizer(other.m_optimizer),
-    m_frozen(other.m_frozen) {
+    m_frozen(other.m_frozen),
+    m_use_model_partition(other.m_use_model_partition) {
 
   // Create deep copy of pointers
   if (m_values != nullptr)      { m_values = m_values->Copy(); }
@@ -107,6 +108,7 @@ weights& weights::operator=(const weights& other) {
   #endif // LBANN_HAS_CUDNN
 
   m_frozen = other.m_frozen;
+  m_use_model_partition = other.m_use_model_partition;
 
   return *this;
 }
@@ -182,6 +184,8 @@ void weights::setup(std::vector<int> matrix_height_dims,
     }
   }
 
+  // Ensure initializer uses the right grid.
+  m_initializer->set_use_model_partition(get_use_model_partition());
   // Initialize weights matrix
   m_matrix_height_dims = matrix_height_dims;
   m_matrix_width_dims = matrix_width_dims;

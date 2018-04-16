@@ -54,9 +54,9 @@ namespace lbann {
 #endif // #ifdef LBANN_DEBUG
 
 lbann_comm::lbann_comm(int ppm, const El::mpi::Comm world) :
-  world_comm(world), grid(nullptr), procs_per_model(ppm), num_model_barriers(0),
-  num_intermodel_barriers(0), num_global_barriers(0), bytes_sent(0),
-  bytes_received(0) {
+  world_comm(world), grid(nullptr), procs_per_model(ppm), model_partitions(1),
+  num_model_barriers(0), num_intermodel_barriers(0), num_global_barriers(0),
+  bytes_sent(0), bytes_received(0) {
 #ifdef LBANN_HAS_ALUMINUM
   // Don't have argc/argv here, but MPI should already be init'd.
   int argc_dummy = 0;
@@ -91,9 +91,10 @@ lbann_comm::~lbann_comm() {
 #endif
 }
 
-void lbann_comm::split_models(int ppm) {
+void lbann_comm::split_models(int ppm, int mp) {
   int world_size = El::mpi::Size(get_world_comm());
   procs_per_model = ppm;
+  model_partitions = mp;
   if (ppm == 0) {
     procs_per_model = world_size;
   }
@@ -112,21 +113,37 @@ void lbann_comm::split_models(int ppm) {
       std::to_string(procs_per_model) + " total number of procs (world size): " +
       std::to_string(world_size));
   }
+  if (procs_per_model % model_partitions != 0) {
+    throw lbann_exception(
+      std::string{} + __FILE__ + " " + std::to_string(__LINE__) +
+      " :: Model must be evenly partitioned: " +
+      std::to_string(model_partitions) + " partitions does not evenly divide " +
+      std::to_string(procs_per_model) + " procs per model");
+  }
 
   num_models = world_size / procs_per_model;
   model_rank = El::mpi::Rank(get_world_comm()) / procs_per_model;
   rank_in_model = El::mpi::Rank(get_world_comm()) % procs_per_model;
+  int procs_per_partition = procs_per_model / model_partitions;
+  int partition_rank = model_rank / procs_per_partition;
+  int rank_in_partition = model_rank % procs_per_partition;
 
-  // Initialize model and intermodel communicators
+  // Initialize model, intermodel, and model partition communicators
   El::mpi::Split(get_world_comm(), model_rank, rank_in_model, model_comm);
   El::mpi::Split(get_world_comm(), rank_in_model, model_rank,
                  intermodel_comm);
+  El::mpi::Split(model_comm, partition_rank, rank_in_partition,
+                 model_partition_comm);
 
-  // Initialize Elemental grid
+  // Initialize Elemental grids.
   if (grid != nullptr) {
     delete grid;
   }
+  if (model_partition_grid != nullptr) {
+    delete model_partition_grid;
+  }
   grid = new Grid(model_comm);
+  model_partition_grid = new Grid(model_partition_comm);
 }
 
 void lbann_comm::intermodel_sum_matrix(Mat& mat) {

@@ -351,6 +351,14 @@ class Layer {
   void unfreeze();
   bool is_frozen() const;
 
+  /** Return whether this layer is using the model partition grid. */
+  bool get_use_model_partition() const { return m_use_model_partition; }
+  /**
+   * Set whether this layer is using the model partition grid.
+   * This should be set before setting up the layer; it does not reset it.
+   */
+  void set_use_model_partition(bool b) { m_use_model_partition = b; }
+
  protected:
 
   /** Reference to LBANN communicator. */
@@ -490,6 +498,13 @@ class Layer {
 
   /** Avoid back prop if frozen */
   bool m_frozen;
+
+  /**
+   * Whether this layer uses the model partition.
+   * If true, data associated with this layer should be distributed only over
+   * the model partition grid and not the entire model grid.
+   */
+  bool m_use_model_partition = false;
 
 #ifdef LBANN_HAS_CUDNN
 

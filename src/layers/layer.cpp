@@ -87,6 +87,7 @@ Layer::Layer(const Layer& other) :
   m_using_gpus(other.m_using_gpus),
   m_cudnn(other.m_cudnn),
   m_frozen(other.m_frozen),
+  m_use_model_partition(other.m_use_model_partition),
 #ifdef LBANN_HAS_CUDNN
   m_mini_batch_size_per_gpu(other.m_mini_batch_size_per_gpu),
   m_max_mini_batch_size_per_gpu(other.m_max_mini_batch_size_per_gpu),
@@ -148,6 +149,7 @@ Layer& Layer::operator=(const Layer& other) {
   m_using_gpus = other.m_using_gpus;
   m_cudnn = other.m_cudnn;
   m_frozen = other.m_frozen;
+  m_use_model_partition = other.m_use_model_partition;
 #ifdef LBANN_HAS_CUDNN
   m_mini_batch_size_per_gpu = other.m_mini_batch_size_per_gpu;
   m_max_mini_batch_size_per_gpu = other.m_max_mini_batch_size_per_gpu;
@@ -501,7 +503,11 @@ bool Layer::is_frozen() const {
 void Layer::setup() {
   setup_pointers();
   setup_dims();
-  setup_matrices(m_comm->get_model_grid());
+  if (get_use_model_partition()) {
+    setup_matrices(m_comm->get_model_partition_grid());
+  } else {
+    setup_matrices(m_comm->get_model_grid());
+  }
   setup_data();
   if (m_using_gpus) {
     setup_gpu();

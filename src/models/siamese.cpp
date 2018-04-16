@@ -88,6 +88,11 @@ void siamese_model::setup_layer_topology() {
   std::vector<Layer*> master_head(m_layers.begin() + heads_start,
                                   m_layers.begin() + heads_end);
 
+  // Set heads to use th emodel partition.
+  for (auto&& layer : master_head) {
+    layer->set_use_model_partition(true);
+  }
+
   // Construct map from follower layers to master layers
   for (const auto& layer : m_layers) {
     m_follower_to_master_layer[layer] = layer;
@@ -131,7 +136,6 @@ void siamese_model::setup_layer_topology() {
                     follower_head.begin(),
                     follower_head.end());
     heads_end += follower_head.size();
-
   }
 
   // Rename layers in master head

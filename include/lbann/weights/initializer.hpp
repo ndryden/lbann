@@ -60,10 +60,17 @@ class weights_initializer {
   /** Initialize entries in a weights matrix. */
   virtual void initialize_entries(AbsDistMat& weights_matrix) const = 0;
 
+  /** Return whether this initializer is using the model partition grid. */
+  bool get_use_model_partition() const { return m_use_model_partition; }
+  /** Set whether to use the model partition grid. */
+  void set_use_model_partition(bool b) { m_use_model_partition = b; }
+
  protected:
 
   /** LBANN communicator. */
   lbann_comm* m_comm;
+  /** Whether to use the model partition grid. */
+  bool m_use_model_partition = false;
 
 };
 

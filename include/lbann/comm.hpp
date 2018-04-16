@@ -103,10 +103,12 @@ class lbann_comm {
 
   /**
    * Split communicators so each model has procs_per_model processes.
+   * Within each model, processors will also be evenly split into
+   * model_partitions groups.
    * If you call this multiple times, it will invalidate existing grids
    * and communicators.
    */
-  void split_models(int procs_per_model);
+  void split_models(int procs_per_model, int model_partitions = 1);
 
   /** Get which model this process is in. */
   inline int get_model_rank() const {
@@ -147,6 +149,10 @@ class lbann_comm {
   /** Return a grid to use for this model. */
   inline Grid& get_model_grid() {
     return *grid;
+  }
+  /** Return the model partition grid. */
+  inline Grid& get_model_partition_grid() {
+    return *model_partition_grid;
   }
   /** Return the total number of models. */
   inline int get_num_models() const {
@@ -887,6 +893,11 @@ class lbann_comm {
     return model_comm;
   }
 
+  /** Return the model partition communicator. */
+  El::mpi::Comm get_model_partition_comm() const { 
+    return model_partition_comm;
+  }
+
   /** Return the world communicator. */
   const El::mpi::Comm get_world_comm() const {
     return world_comm;
@@ -925,16 +936,22 @@ class lbann_comm {
   const El::mpi::Comm world_comm;
   /** Communicator for every process in this model. */
   El::mpi::Comm model_comm;
+  /** Communicator for every process in this model partition. */
+  El::mpi::Comm model_partition_comm;
   /** Communicator for every process with the same model rank. */
   El::mpi::Comm intermodel_comm;
   /** Communicator for every process in the same compute node. */
   El::mpi::Comm node_comm;
   /** Grid for this model. */
   Grid *grid;
+  /** Grid for this model partition. */
+  Grid *model_partition_grid = nullptr;
   /** Number of models. */
   int num_models;
   /** Number of processors per model. */
   int procs_per_model;
+  /** Number of partitions within each model. */
+  int model_partitions;
   /** Rank of the model this process is in. */
   int model_rank;
   /** Rank of this process within its model. */
